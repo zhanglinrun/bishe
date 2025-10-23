@@ -7,6 +7,7 @@ import argparse
 import torch
 import os
 import sys
+from datetime import datetime
 
 # 导入数据加载器
 from dataset.data_loader import get_dataloaders
@@ -38,6 +39,10 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='RML2016.10a',
                        choices=['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod'],
                        help='数据集名称')
+    parser.add_argument('--data_snr', type=str, default='10dB',
+                       help='SNR标识（如 10dB, 100dB, highsnr）')
+    parser.add_argument('--data_dir', type=str, default='data_processed',
+                       help='预处理数据目录')
     
     # 算法参数
     parser.add_argument('--algorithm', type=str, default='FedAvg',
@@ -45,8 +50,8 @@ def parse_args():
                        help='联邦学习算法')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='CNN1D',
-                       choices=['CNN1D', 'ResNet1D'],
+    parser.add_argument('--model', type=str, default='MCLDNN',
+                       choices=['CNN1D', 'ResNet1D', 'MCLDNN'],
                        help='模型架构')
     
     # 联邦学习参数
@@ -60,7 +65,7 @@ def parse_args():
     # 训练参数
     parser.add_argument('--batch_size', type=int, default=128,
                        help='批大小')
-    parser.add_argument('--learning_rate', type=float, default=0.01,
+    parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='学习率')
     
     # 优化器参数
@@ -245,11 +250,13 @@ def main():
     # 设置随机种子
     set_seed(args.seed)
     
-    # 创建输出目录
-    os.makedirs(args.output_dir, exist_ok=True)
+    # 创建临时输出目录（带时间戳）
+    timestamp = datetime.now().strftime('%m%d%H%M')
+    temp_output_dir = os.path.join(args.output_dir, f'temp_{timestamp}')
+    os.makedirs(temp_output_dir, exist_ok=True)
     
     # 设置日志
-    log_file = os.path.join(args.output_dir, 
+    log_file = os.path.join(temp_output_dir, 
                            f"{args.dataset}_{args.algorithm}_log.txt")
     logger = setup_logger(log_file)
     
@@ -257,6 +264,7 @@ def main():
     logger.info("联邦学习自动调制识别")
     logger.info("=" * 80)
     logger.info(f"数据集: {args.dataset}")
+    logger.info(f"SNR: {args.data_snr}")
     logger.info(f"算法: {args.algorithm}")
     logger.info(f"模型: {args.model}")
     logger.info(f"客户端数量: {args.num_clients}")
@@ -279,7 +287,9 @@ def main():
         num_clients=args.num_clients,
         batch_size=args.batch_size,
         non_iid_type=args.non_iid_type,
-        alpha=args.alpha
+        alpha=args.alpha,
+        data_snr=args.data_snr,
+        data_dir=args.data_dir
     )
     
     # 获取数据集配置
@@ -315,7 +325,7 @@ def main():
     logger.info("保存结果...")
     
     # 保存 CSV 日志
-    csv_file = os.path.join(args.output_dir, 
+    csv_file = os.path.join(temp_output_dir, 
                            f"{args.dataset}_{args.algorithm}_metrics.csv")
     
     # 先写表头
@@ -332,7 +342,7 @@ def main():
     logger.info(f"训练指标已保存到: {csv_file}")
     
     # 保存模型
-    model_file = os.path.join(args.output_dir, 
+    model_file = os.path.join(temp_output_dir, 
                              f"{args.dataset}_{args.algorithm}_model.pt")
     save_model(server.model, model_file)
     logger.info(f"模型已保存到: {model_file}")
@@ -345,6 +355,28 @@ def main():
     logger.info(f"最终测试准确率: {final_acc:.2f}%")
     logger.info(f"最终测试损失: {final_loss:.4f}")
     logger.info("=" * 80)
+    
+    # 关闭所有日志处理器，释放文件句柄
+    for handler in logger.handlers[:]:
+        handler.close()
+        logger.removeHandler(handler)
+    
+    # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
+    params_str = f"{args.num_clients}_{args.learning_rate}_{args.batch_size}_{args.local_epochs}"
+    final_dirname = f"{args.dataset}_{args.data_snr}_{args.algorithm}_{args.model}_{final_acc:.2f}pct_{params_str}_{timestamp}"
+    final_output_dir = os.path.join(args.output_dir, final_dirname)
+    
+    # 重命名临时目录为最终目录
+    try:
+        os.rename(temp_output_dir, final_output_dir)
+        print(f"结果已保存到: {final_output_dir}")
+    except PermissionError as e:
+        print(f"警告：无法重命名目录 {temp_output_dir} -> {final_output_dir}")
+        print(f"错误信息: {e}")
+        print(f"结果保存在临时目录: {temp_output_dir}")
+        final_output_dir = temp_output_dir
+    
+    print("=" * 80)
 
 
 if __name__ == '__main__':

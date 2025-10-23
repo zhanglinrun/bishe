@@ -20,11 +20,6 @@ wheels/
 .installed.cfg
 *.egg
 
-# 虚拟环境
-venv/
-ENV/
-env/
-
 # IDE
 .vscode/
 .idea/
@@ -56,3 +51,6 @@ dataset/HisarMod/
 dataset/RML2016.10a/
 dataset/RML2016.10b/
 dataset/RML2018a/
+data_processed/
+
+results/

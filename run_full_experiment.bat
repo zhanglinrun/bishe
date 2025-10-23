@@ -28,6 +28,14 @@ python main.py --dataset RML2016.10a --algorithm FedGen --num_rounds 100 --num_c
 echo.
 echo 生成对比图...
 python main_plot.py --dataset RML2016.10a --algorithms FedAvg FedProx FedGen
+echo ========================================
+echo 步骤 3: 按SNR评估模型性能
+echo ========================================
+echo.
+echo 注意：需要手动填入训练后生成的模型路径
+echo 示例：
+echo python test_snr.py --model_path results/RML2016.10a_100dB_FedAvg_XX.XX%%_5_0.01_128_5_MMDDHHMM/RML2016.10a_FedAvg_model.pt --dataset_name RML2016.10a
+echo.
 
 echo.
 echo ================================================================================

@@ -1,6 +1,6 @@
 """
 自动调制识别模型定义
-包括 CNN1D 和 ResNet1D 架构
+包括 CNN1D, ResNet1D 和 MCLDNN 架构
 """
 
 import torch
@@ -165,12 +165,92 @@ class ResNet1D_AMR(nn.Module):
         return x
 
 
+class MCLDNN_AMR(nn.Module):
+    """
+    MCLDNN (Multi-Channel Long Short-Term Memory Deep Neural Network) 用于自动调制识别
+    架构: CNN提取特征 → LSTM处理时序 → Dense分类
+    参考论文: A Spatiotemporal Multi-Channel Learning Framework for Automatic Modulation Recognition
+    
+    输入: [B, 2, L] (I/Q两通道)
+    输出: [B, num_classes]
+    """
+    
+    def __init__(self, num_classes=11, signal_length=128):
+        super(MCLDNN_AMR, self).__init__()
+        
+        self.num_classes = num_classes
+        self.signal_length = signal_length
+        
+        # CNN层：提取空间特征
+        self.conv1 = nn.Conv1d(in_channels=2, out_channels=64, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(64)
+        
+        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(128)
+        
+        # LSTM层：处理时序依赖
+        # 输入: (batch, seq_len, input_size)
+        # 输出: (batch, seq_len, hidden_size * 2) 因为是双向LSTM
+        self.lstm = nn.LSTM(
+            input_size=128,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.3
+        )
+        
+        # 全连接层：分类
+        # LSTM输出是双向的，所以维度是 hidden_size * 2 = 256
+        self.fc1 = nn.Linear(256, 128)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(128, num_classes)
+    
+    def forward(self, x):
+        # 输入: [B, 2, L]
+        
+        # CNN特征提取
+        # Conv1
+        x = self.conv1(x)  # [B, 64, L]
+        x = self.bn1(x)
+        x = F.relu(x)
+        
+        # Conv2
+        x = self.conv2(x)  # [B, 128, L]
+        x = self.bn2(x)
+        x = F.relu(x)
+        
+        # 转换维度以适配LSTM: [B, C, L] -> [B, L, C]
+        x = x.permute(0, 2, 1)  # [B, L, 128]
+        
+        # LSTM时序处理
+        # lstm_out: [B, L, 256] (256 = hidden_size * 2)
+        lstm_out, (h_n, c_n) = self.lstm(x)
+        
+        # 使用最后一个时间步的输出
+        # h_n shape: [num_layers * num_directions, B, hidden_size]
+        # 我们需要最后一层的两个方向
+        # 前向最后一层: h_n[-2, :, :]
+        # 后向最后一层: h_n[-1, :, :]
+        forward_hidden = h_n[-2, :, :]  # [B, 128]
+        backward_hidden = h_n[-1, :, :]  # [B, 128]
+        hidden = torch.cat([forward_hidden, backward_hidden], dim=1)  # [B, 256]
+        
+        # 全连接分类
+        x = self.fc1(hidden)  # [B, 128]
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)  # [B, num_classes]
+        
+        return x
+
+
 def get_model(model_name, num_classes, signal_length):
     """
     获取模型实例
     
     Args:
-        model_name: 模型名称 ('CNN1D' 或 'ResNet1D')
+        model_name: 模型名称 ('CNN1D', 'ResNet1D' 或 'MCLDNN')
         num_classes: 类别数
         signal_length: 信号长度
         
@@ -181,6 +261,8 @@ def get_model(model_name, num_classes, signal_length):
         return CNN1D_AMR(num_classes=num_classes, signal_length=signal_length)
     elif model_name == 'ResNet1D':
         return ResNet1D_AMR(num_classes=num_classes, signal_length=signal_length)
+    elif model_name == 'MCLDNN':
+        return MCLDNN_AMR(num_classes=num_classes, signal_length=signal_length)
     else:
-        raise ValueError(f"未知模型: {model_name}. 支持的模型: CNN1D, ResNet1D")
+        raise ValueError(f"未知模型: {model_name}. 支持的模型: CNN1D, ResNet1D, MCLDNN")
 

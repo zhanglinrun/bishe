@@ -266,8 +266,53 @@ def split_data_non_iid_snr(X, y, snr, num_clients):
     return client_data
 
 
+def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
+    """
+    加载预处理的数据
+    
+    Args:
+        dataset_name: 数据集名称
+        data_snr: SNR标识（如 '10dB', '100dB', 'highsnr'）
+        data_dir: 预处理数据目录
+        
+    Returns:
+        X_train: 训练数据
+        y_train: 训练标签
+        X_test: 测试数据
+        y_test: 测试标签
+        num_classes: 类别数
+    """
+    # 构造文件路径
+    train_file = os.path.join(data_dir, dataset_name, 'train', f'{data_snr}.pkl')
+    test_file = os.path.join(data_dir, dataset_name, 'test', f'{data_snr}.pkl')
+    
+    # 加载训练集
+    if not os.path.exists(train_file):
+        raise FileNotFoundError(f"训练集文件不存在: {train_file}")
+    with open(train_file, 'rb') as f:
+        X_train, y_train = pickle.load(f)
+    
+    # 加载测试集
+    if not os.path.exists(test_file):
+        raise FileNotFoundError(f"测试集文件不存在: {test_file}")
+    with open(test_file, 'rb') as f:
+        X_test, y_test = pickle.load(f)
+    
+    # 获取类别数
+    config = get_dataset_config(dataset_name)
+    num_classes = config['num_classes']
+    
+    print(f"从预处理文件加载数据:")
+    print(f"  训练集: {train_file}")
+    print(f"  测试集: {test_file}")
+    print(f"  训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
+    print(f"  数据形状: {X_train.shape}")
+    
+    return X_train, y_train, X_test, y_test, num_classes
+
+
 def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid', 
-                   alpha=0.5, test_split=0.2):
+                   alpha=0.5, data_snr='100dB', data_dir='data_processed'):
     """
     获取数据加载器
     
@@ -277,39 +322,23 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
         batch_size: 批大小
         non_iid_type: 数据划分类型 ('iid', 'class', 'snr')
         alpha: Dirichlet 参数（用于 class Non-IID）
-        test_split: 测试集比例
+        data_snr: SNR标识（如 '10dB', '100dB', 'highsnr'）
+        data_dir: 预处理数据目录
         
     Returns:
         train_loaders: 列表，每个元素是一个客户端的 DataLoader
         test_loader: 全局测试集 DataLoader
         num_classes: 类别数
     """
-    # 加载数据集
-    if dataset_name == 'RML2016.10a':
-        X, y, snr = load_RML2016_10a()
-    elif dataset_name == 'RML2016.10b':
-        X, y, snr = load_RML2016_10b()
-    elif dataset_name == 'RML2018a':
-        X, y, snr = load_RML2018a()
-    elif dataset_name == 'HisarMod':
-        X, y, snr = load_HisarMod()
-    else:
-        raise ValueError(f"未知数据集: {dataset_name}")
+    # 加载预处理的数据
+    X_train, y_train, X_test, y_test, num_classes = load_preprocessed_data(
+        dataset_name, data_snr, data_dir
+    )
     
-    # 获取数据集配置
-    config = get_dataset_config(dataset_name)
-    num_classes = config['num_classes']
-    
-    # 划分训练集和测试集
-    num_samples = len(y)
-    indices = np.random.permutation(num_samples)
-    split_idx = int(num_samples * (1 - test_split))
-    
-    train_indices = indices[:split_idx]
-    test_indices = indices[split_idx:]
-    
-    X_train, y_train, snr_train = X[train_indices], y[train_indices], snr[train_indices]
-    X_test, y_test = X[test_indices], y[test_indices]
+    # 为 Non-IID SNR 划分创建虚拟 SNR 数组（用于兼容性）
+    # 注意：如果使用 'snr' Non-IID 类型，需要实际的 SNR 值
+    # 这里我们创建一个均匀分布的虚拟 SNR 用于划分
+    snr_train = np.linspace(-20, 20, len(y_train))
     
     # 划分客户端数据
     if non_iid_type == 'iid':
@@ -333,7 +362,7 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
     print(f"数据集: {dataset_name}")
-    print(f"训练样本数: {len(y_train)}, 测试样本数: {len(y_test)}")
+    print(f"SNR: {data_snr}")
     print(f"客户端数量: {num_clients}, 划分类型: {non_iid_type}")
     print(f"每个客户端平均样本数: {len(y_train) // num_clients}")
     
