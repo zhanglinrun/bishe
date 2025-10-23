@@ -398,7 +398,7 @@ def process_dataset(dataset_name, input_dir, output_dir):
 def main():
     parser = argparse.ArgumentParser(description='数据集预处理：按SNR分割')
     
-    parser.add_argument('--dataset', type=str, default='RML2018a',
+    parser.add_argument('--dataset', type=str, default='all',
                        choices=['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod', 'all'],
                        help='要处理的数据集（默认：all，处理所有数据集）')
     parser.add_argument('--input_dir', type=str, default='dataset',

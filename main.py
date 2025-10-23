@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='RML2016.10a',
                        choices=['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod'],
                        help='数据集名称')
-    parser.add_argument('--data_snr', type=str, default='10dB',
+    parser.add_argument('--data_snr', type=str, default='100dB',
                        help='SNR标识（如 10dB, 100dB, highsnr）')
     parser.add_argument('--data_dir', type=str, default='data_processed',
                        help='预处理数据目录')
@@ -57,9 +57,9 @@ def parse_args():
     # 联邦学习参数
     parser.add_argument('--num_clients', type=int, default=10,
                        help='客户端数量')
-    parser.add_argument('--num_rounds', type=int, default=100,
+    parser.add_argument('--num_rounds', type=int, default=40,
                        help='训练轮次')
-    parser.add_argument('--local_epochs', type=int, default=5,
+    parser.add_argument('--local_epochs', type=int, default=10,
                        help='本地训练轮数')
     
     # 训练参数
@@ -69,7 +69,7 @@ def parse_args():
                        help='学习率')
     
     # 优化器参数
-    parser.add_argument('--optimizer', type=str, default='adam',
+    parser.add_argument('--optimizer', type=str, default='adamw',
                        choices=['sgd', 'adam', 'adamw'],
                        help='优化器类型（默认：adam）')
     parser.add_argument('--momentum', type=float, default=0.9,
@@ -362,7 +362,7 @@ def main():
         logger.removeHandler(handler)
     
     # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
-    params_str = f"{args.num_clients}_{args.learning_rate}_{args.batch_size}_{args.local_epochs}"
+    params_str = f"{args.num_clients}_{arg.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
     final_dirname = f"{args.dataset}_{args.data_snr}_{args.algorithm}_{args.model}_{final_acc:.2f}pct_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
     
