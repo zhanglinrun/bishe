@@ -7,9 +7,6 @@ FedGen 服务器
 import torch
 import copy
 from FLAlgorithms.servers.serverbase import Server
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from utils.model_utils import average_weights
 
 
@@ -30,6 +27,8 @@ class ServerFedGen(Server):
         """
         super(ServerFedGen, self).__init__(model, users, num_rounds, device)
         self.generator = generator.to(device)
+        self.gen_projection = torch.nn.Linear(generator.embedding_dim, model.num_classes).to(device)
+        # 初始化投影层，需在首次发送前设置
     
     def send_parameters(self):
         """
@@ -37,10 +36,13 @@ class ServerFedGen(Server):
         """
         global_params = self.model.state_dict()
         gen_params = self.generator.state_dict()
+        proj_params = self.gen_projection.state_dict() if self.gen_projection is not None else None
         
         for user in self.users:
             user.set_parameters(global_params)
             user.set_generator_parameters(gen_params)
+            if proj_params is not None:
+                user.set_projection_parameters(proj_params)
     
     def aggregate_parameters(self):
         """
@@ -66,12 +68,25 @@ class ServerFedGen(Server):
         
         # 聚合生成器参数
         gen_params = []
+        proj_params = []
         for user in self.users:
             gen_params.append(user.get_generator_parameters())
+            proj_params.append(user.get_projection_parameters())
         
-        # 加权平均生成器
+        # 加权平均生成器与投影
         global_gen_params = average_weights(gen_params, client_weights)
         self.generator.load_state_dict(global_gen_params)
+
+        if proj_params:
+            if self.gen_projection is None:
+                # 以第一个客户端的形状初始化
+                sample_proj = proj_params[0]
+                # 找到 weight/bias 推断尺寸
+                weight = sample_proj[[k for k in sample_proj.keys() if 'weight' in k][0]]
+                in_features, out_features = weight.shape[1], weight.shape[0]
+                self.gen_projection = torch.nn.Linear(in_features, out_features).to(self.device)
+            global_proj_params = average_weights(proj_params, client_weights)
+            self.gen_projection.load_state_dict(global_proj_params)
     
     def train(self, test_loader, local_epochs, logger=None):
         """

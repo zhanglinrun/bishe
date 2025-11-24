@@ -15,16 +15,19 @@ from dataset.data_loader import get_dataloaders
 # 导入模型
 from FLAlgorithms.trainmodel.models import get_model
 from FLAlgorithms.trainmodel.generator import Generator
+from FLAlgorithms.trainmodel.diffusion import DiffusionAligner
 
 # 导入客户端
 from FLAlgorithms.users.useravg import UserAVG
 from FLAlgorithms.users.userFedProx import UserFedProx
 from FLAlgorithms.users.userpFedGen import UserFedGen
+from FLAlgorithms.users.userFDAM import UserFDAM
 
 # 导入服务器
 from FLAlgorithms.servers.serveravg import ServerAVG
 from FLAlgorithms.servers.serverFedProx import ServerFedProx
 from FLAlgorithms.servers.serverpFedGen import ServerFedGen
+from FLAlgorithms.servers.serverFDAM import ServerFDAM
 
 # 导入工具函数
 from utils.model_config import get_dataset_config
@@ -46,7 +49,7 @@ def parse_args():
     
     # 算法参数
     parser.add_argument('--algorithm', type=str, default='FedAvg',
-                       choices=['FedAvg', 'FedProx', 'FedGen'],
+                       choices=['FedAvg', 'FedProx', 'FedGen', 'FDAM'],
                        help='联邦学习算法')
     
     # 模型参数
@@ -93,6 +96,20 @@ def parse_args():
                        help='生成器学习率')
     parser.add_argument('--latent_dim', type=int, default=100,
                        help='潜在向量维度')
+
+    # FDAM 参数
+    parser.add_argument('--diffusion_steps', type=int, default=10,
+                       help='FDAM 扩散步数（用于控制对齐难度的超参，当前实现为单步去噪）')
+    parser.add_argument('--align_hidden', type=int, default=256,
+                       help='FDAM 对齐模块隐藏维度')
+    parser.add_argument('--lambda_diff', type=float, default=0.5,
+                       help='FDAM 噪声预测损失权重')
+    parser.add_argument('--lambda_align', type=float, default=0.5,
+                       help='FDAM 原型对齐损失权重')
+    parser.add_argument('--align_beta', type=float, default=0.5,
+                       help='FDAM 聚合时基于分布偏移的惩罚系数')
+    parser.add_argument('--align_noise_std', type=float, default=0.1,
+                       help='FDAM 特征加噪标准差')
     
     # 输出参数
     parser.add_argument('--output_dir', type=str, default='./results',
@@ -122,7 +139,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def create_users(algorithm, num_clients, model, train_loaders, args):
+def create_users(algorithm, num_clients, model, train_loaders, args, feature_dim=None):
     """
     创建客户端列表
     
@@ -168,11 +185,12 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
             users.append(user)
     
     elif algorithm == 'FedGen':
+        embed_dim = feature_dim if feature_dim is not None else 256
         for i in range(num_clients):
-            # 创建生成器（嵌入维度设为 256，与分类器 fc1 层一致）
+            # 创建生成器（嵌入维度对齐分类器特征维度）
             generator = Generator(
                 latent_dim=args.latent_dim,
-                embedding_dim=256,
+                embedding_dim=embed_dim,
                 hidden_dim=512
             )
             
@@ -185,16 +203,43 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
                 gen_learning_rate=args.gen_learning_rate,
                 device=args.device,
                 latent_dim=args.latent_dim,
+                feature_dim=embed_dim,
                 optimizer_type=args.optimizer,
                 momentum=args.momentum,
                 weight_decay=args.weight_decay
+            )
+            users.append(user)
+
+    elif algorithm == 'FDAM':
+        # 预计算特征维度
+        feat_dim = feature_dim
+        for i in range(num_clients):
+            aligner = DiffusionAligner(
+                feature_dim=feat_dim,
+                hidden_dim=args.align_hidden,
+                diffusion_steps=args.diffusion_steps
+            )
+            user = UserFDAM(
+                user_id=i,
+                model=get_model(args.model, model.num_classes, model.signal_length),
+                aligner=aligner,
+                train_loader=train_loaders[i],
+                learning_rate=args.learning_rate,
+                device=args.device,
+                optimizer_type=args.optimizer,
+                momentum=args.momentum,
+                weight_decay=args.weight_decay,
+                lambda_diff=args.lambda_diff,
+                lambda_align=args.lambda_align,
+                mu=args.mu,
+                noise_std=args.align_noise_std
             )
             users.append(user)
     
     return users
 
 
-def create_server(algorithm, model, users, args):
+def create_server(algorithm, model, users, args, feature_dim=None):
     """
     创建服务器
     
@@ -224,10 +269,11 @@ def create_server(algorithm, model, users, args):
         )
     
     elif algorithm == 'FedGen':
+        embed_dim = feature_dim if feature_dim is not None else 256
         # 创建全局生成器
         generator = Generator(
             latent_dim=args.latent_dim,
-            embedding_dim=256,
+            embedding_dim=embed_dim,
             hidden_dim=512
         )
         
@@ -236,6 +282,26 @@ def create_server(algorithm, model, users, args):
             generator=generator,
             users=users,
             num_rounds=args.num_rounds,
+            device=args.device
+        )
+
+    elif algorithm == 'FDAM':
+        with torch.no_grad():
+            dummy = torch.zeros(1, 2, model.signal_length)
+            feat_dim = model.extract_features(dummy).shape[-1]
+        aligner = DiffusionAligner(
+            feature_dim=feat_dim,
+            hidden_dim=args.align_hidden,
+            diffusion_steps=args.diffusion_steps
+        )
+        server = ServerFDAM(
+            model=model,
+            aligner=aligner,
+            users=users,
+            num_rounds=args.num_rounds,
+            num_classes=model.num_classes,
+            feature_dim=feat_dim,
+            align_beta=args.align_beta,
             device=args.device
         )
     
@@ -303,15 +369,20 @@ def main():
     logger.info("创建模型...")
     global_model = get_model(args.model, num_classes, signal_length)
     logger.info(f"模型参数数量: {sum(p.numel() for p in global_model.parameters())}")
+
+    # 预计算特征维度，供 FedGen/FDAM 使用
+    with torch.no_grad():
+        dummy = torch.zeros(1, 2, signal_length)
+        feature_dim = global_model.extract_features(dummy).shape[-1]
     
     # 创建客户端
     logger.info("创建客户端...")
-    users = create_users(args.algorithm, args.num_clients, global_model, train_loaders, args)
+    users = create_users(args.algorithm, args.num_clients, global_model, train_loaders, args, feature_dim)
     logger.info(f"已创建 {len(users)} 个客户端")
     
     # 创建服务器
     logger.info("创建服务器...")
-    server = create_server(args.algorithm, global_model, users, args)
+    server = create_server(args.algorithm, global_model, users, args, feature_dim)
     
     # 开始训练
     logger.info("=" * 80)
@@ -362,7 +433,7 @@ def main():
         logger.removeHandler(handler)
     
     # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
-    params_str = f"{args.num_clients}_{arg.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
+    params_str = f"{args.num_clients}_{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
     final_dirname = f"{args.dataset}_{args.data_snr}_{args.algorithm}_{args.model}_{final_acc:.2f}pct_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
     

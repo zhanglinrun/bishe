@@ -1,9 +1,9 @@
-# 联邦学习自动调制识别（FedAvg/FedProx/FedGen & FedBKD）
+# 联邦学习自动调制识别（FedAvg/FedProx/FedGen/FDAM）
 
 ## 1. 项目简介 (Introduction)
 
-* **项目目标:** 面向无线电自动调制识别（Automatic Modulation Recognition, AMR）的联邦学习实验平台，支持经典联邦算法（FedAvg、FedProx、FedGen）以及基于知识蒸馏的联邦蒸馏方案（FedBKD）。提供数据预处理、联邦训练、指标可视化和按信噪比测试的完整流程。
-* **核心技术:** 基于 1D CNN、1D ResNet 和 MCLDNN 的基线分类器，配合 FedAvg/FedProx/FedGen 联邦优化；另含 CVAE+GMM 伪样本生成与双向知识蒸馏的 FedBKD 实验管线。
+* **项目目标:** 面向无线电自动调制识别（Automatic Modulation Recognition, AMR）的联邦学习实验平台，支持经典联邦算法（FedAvg、FedProx、FedGen）与新增联邦扩散对齐 FDAM。提供数据预处理、联邦训练、指标可视化和按信噪比测试的完整流程。
+* **核心技术:** 基于 1D CNN、1D ResNet 和 MCLDNN 的基线分类器；FDAM 在特征空间引入扩散式对齐模块与类原型聚合缓解非 IID。
 * **框架:** 全部基于 PyTorch 实现，训练与数据管线均使用 PyTorch / scikit-learn / matplotlib 等开源组件。
 
 ## 2. 项目框架 (Project Structure)
@@ -16,21 +16,17 @@
   │   └── data_loader.py          # 预处理数据加载与客户端划分
   ├── data_processed/             # 运行 datasplit 后生成的预处理数据（需手动生成）
   ├── FLAlgorithms/               # 联邦学习核心实现
-  │   ├── servers/                # 服务器端逻辑（FedAvg/FedProx/FedGen）
+  │   ├── servers/                # 服务器端逻辑（FedAvg/FedProx/FedGen/FDAM）
   │   ├── users/                  # 客户端训练逻辑
-  │   ├── trainmodel/             # 分类模型与生成器
+  │   ├── trainmodel/             # 分类模型、生成器与扩散对齐模块
   │   └── optimizers/             # 优化器封装
-  ├── FedBKD/                     # 基于蒸馏的联邦学习实验管线
-  │   ├── distill/                # 蒸馏流程与通信协议
-  │   ├── models/                 # 客户端/全局模型、CVAE、GMM 索引
-  │   └── utils.py                # 评估与可视化工具
   ├── utils/                      # 通用工具（配置、日志、绘图）
   ├── results/                    # 训练与测试输出（运行后生成）
   ├── main.py                     # FedAvg/FedProx/FedGen 主训练入口
   ├── main_plot.py                # 训练指标可视化脚本
   ├── test_snr.py                 # 按 SNR 分档测试脚本
   ├── run_full_experiment.bat     # Windows 批处理示例（全流程）
-  └── FedBKD/test.py              # FedBKD 模型按 SNR 评估
+  └── README.md                   # 项目说明
   ```
 
 * **文件功能详解（逐个 .py 文件）：**
@@ -73,12 +69,16 @@
     - **交互:** 被 `main_plot.py` 等分析脚本调用。
 
   - `FLAlgorithms/trainmodel/models.py`
-    - **作用:** 定义三种 AMR 分类模型：`CNN1D_AMR`、`ResNet1D_AMR`、`MCLDNN_AMR`；`get_model` 返回实例。
-    - **交互:** 训练入口与客户端类均通过 `get_model` 构建模型实例。
+    - **作用:** 定义三种 AMR 分类模型：`CNN1D_AMR`、`ResNet1D_AMR`、`MCLDNN_AMR`；提供 `extract_features`/`classify_from_features` 接口支持 FDAM 对齐。
+    - **交互:** 训练入口与客户端类均通过 `get_model` 构建模型实例，FDAM/FedGen 使用特征接口。
 
   - `FLAlgorithms/trainmodel/generator.py`
     - **作用:** FedGen 的伪特征生成器（`Generator`、`ConditionalGenerator`），负责从潜在向量生成嵌入或条件嵌入。
     - **交互:** FedGen 客户端/服务器在蒸馏或聚合时共享生成器参数。
+
+  - `FLAlgorithms/trainmodel/diffusion.py`
+    - **作用:** 轻量级特征空间扩散对齐模块 `DiffusionAligner`，用于 FDAM 的噪声预测与特征去噪对齐。
+    - **交互:** 被 FDAM 客户端与服务器共享和聚合。
 
   - `FLAlgorithms/optimizers/fedoptimizer.py`
     - **作用:** 统一获取 SGD/Adam/AdamW 优化器的简化工厂函数。
@@ -100,6 +100,10 @@
     - **作用:** FedGen 服务器，负责同时聚合分类器与生成器参数。
     - **交互:** 调用用户的分类器与生成器权重，实现数据自由知识蒸馏。
 
+  - `FLAlgorithms/servers/serverFDAM.py`
+    - **作用:** FDAM 服务器，聚合分类模型、扩散对齐模块与类原型统计，并依据分布偏移自适应加权。
+    - **交互:** 与 FDAM 客户端同步原型与对齐模块。
+
   - `FLAlgorithms/users/userbase.py`
     - **作用:** 客户端基类，封装优化器、损失、参数同步与测试。
     - **交互:** 被各具体算法客户端继承并覆盖 `train` 方法。
@@ -116,46 +120,9 @@
     - **作用:** FedGen 客户端，先训练生成器，再用真实数据（可选伪数据）训练分类器，维护生成器投影与蒸馏温度。
     - **交互:** 与 `ServerFedGen` 同步分类器/生成器参数。
 
-  - `FedBKD/main.py`
-    - **作用:** 基于 CVAE+GMM 的联邦蒸馏主流程：数据加载、客户端 CVAE 训练、云端聚合并生成伪样本、双向蒸馏、日志与模型存储。
-    - **关键组件:** `to_tensor_loader` 统一数据形状；`adjust_learning_rate` 调度 LR；`ClientWeightManager`/`AdaptiveDistillWeight` 调整蒸馏权重；主循环中生成伪样本、训练全局与客户端模型并记录性能。
-    - **交互:** 依赖 `FedBKD/data_loader.py` 划分客户端数据，`FedBKD/models/*` 提供模型与生成器，`FedBKD/distill/*` 提供蒸馏与通信协议，`FedBKD/utils.py` 评估与可视化。
-
-  - `FedBKD/data_loader.py`
-    - **作用:** 从 RML2016.10a pkl 加载并按“每客户端限定若干调制类型”的非重叠划分生成联邦数据。
-    - **关键函数:** `load_federated_data` 支持指定调制类别、SNR 范围、客户端/类别数并返回 train/test 字典，亦可返回全局数据。
-
-  - `FedBKD/config.py`
-    - **作用:** argparse 配置，包括数据路径、客户端数量、蒸馏温度、LR、CVAE 参数、日志/权重路径等。
-    - **交互:** `FedBKD/main.py` 和 `FedBKD/test.py` 读取默认值，可通过命令行覆盖。
-
-  - `FedBKD/utils.py`
-    - **作用:** 评估准确率、t-SNE 可视化、混淆矩阵绘制、模型保存/加载。
-
-  - `FedBKD/distill/client_to_cloud.py`
-    - **作用:** 客户端→云端蒸馏：平均 logits、基于准确率/损失更新权重、`train_global_model` 通过 KL + CE 训练全局模型。
-
-  - `FedBKD/distill/cloud_to_client.py`
-    - **作用:** 云端→客户端蒸馏：自适应蒸馏权重管理（`AdaptiveDistillWeight`），`train_local_with_distill` 将 soft label 蒸馏到本地模型。
-
-  - `FedBKD/distill/communication_protocol.py`
-    - **作用:** 模拟隐私保护的通信协议：记录上传/下载、噪声注入、索引图分发与统计摘要。
-
-  - `FedBKD/models/global_model.py`
-    - **作用:** 统一的轻量级全局学生模型，`extract_logits` 提供蒸馏特征。
-
-  - `FedBKD/models/client_models.py`
-    - **作用:** 多种异构客户端卷积网络（1~5 与 A~E），`get_client_model` 按字母编号返回模型。
-
-  - `FedBKD/models/cvae.py`
-    - **作用:** 条件变分自编码器，带变形增强与 GMM 索引采样；`train_cvae` 训练函数；`collect_encoding_statistics` 供云端聚合。
-
-  - `FedBKD/models/gmm_index_map.py`
-    - **作用:** GMM 索引图生成器，支持隐私标签置换与采样；`fit_cloud_gmm`/`distribute_index_map` 等完成云端拟合与客户端接收。
-
-  - `FedBKD/test.py`
-    - **作用:** 对保存的 FedBKD 全局模型按不同 SNR 评估并写入 Excel。
-    - **交互:** 需指定 `--model_path` 与数据 pkl，调用 `evaluate_model`。
+  - `FLAlgorithms/users/userFDAM.py`
+    - **作用:** FDAM 客户端，在特征空间加噪、预测噪声并对齐到全局原型，总损失包含分类、扩散噪声、原型对齐与近端约束。
+    - **交互:** 与 `ServerFDAM` 同步模型/对齐模块参数并上传本地原型统计。
 
   - `run_full_experiment.bat`
     - **作用:** Windows 平台一键执行 FedAvg/FedProx/FedGen 训练、绘图及按 SNR 测试的示例脚本。
@@ -165,7 +132,7 @@
 * **依赖列表（核心）：**
   - `torch`, `torchvision`
   - `numpy`, `h5py`, `pandas`, `scikit-learn`, `matplotlib`, `seaborn`（绘图混淆矩阵用）
-  - `tqdm`（可选进度条）、`openpyxl`（FedBKD/test 写入 Excel）
+  - `tqdm`（可选进度条）
 * **创建虚拟环境（推荐 Conda）：**
   ```bash
   conda create -n fl-amr python=3.9 -y
@@ -226,6 +193,21 @@ python main.py \
 输出：
 * `results/temp_<timestamp>/` 中包含训练日志（`*_log.txt`）、指标 CSV（`*_metrics.csv`）、模型权重（`*_model.pt`）。脚本末尾会尝试根据准确率重命名目录。
 
+**FDAM：联邦扩散对齐训练（新增）**
+
+```bash
+python main.py \
+  --algorithm FDAM \
+  --dataset RML2016.10a --data_snr 100dB --data_dir data_processed \
+  --model MCLDNN --num_clients 10 --num_rounds 40 --local_epochs 5 \
+  --learning_rate 0.001 --batch_size 128 \
+  --lambda_diff 0.5 --lambda_align 0.5 \
+  --diffusion_steps 10 --align_hidden 256 \
+  --align_beta 0.5 --align_noise_std 0.1
+```
+
+运行说明：FDAM 在客户端特征空间加噪并预测噪声，得到对齐特征后再分类；服务器联合聚合分类模型、扩散对齐模块与类原型，并根据分布偏移自适应加权。输出目录格式与其他算法一致。
+
 ### 4.3 测试/推理流程 (Testing/Inference Process)
 
 **按 SNR 评估已训练模型（主联邦线路）**
@@ -248,27 +230,6 @@ python test_snr.py \
 python main_plot.py --dataset RML2016.10a --metrics_dir results --algorithms FedAvg FedProx FedGen --output_dir results/plots
 ```
 
-**FedBKD 蒸馏管线（可选高级实验）**
-
-1) 运行 FedBKD 主实验：
-```bash
-python FedBKD/main.py \
-  --data_dir /path/to/RML2016.10a_dict.pkl \   # 注意默认值为绝对路径，需根据实际数据位置修改
-  --num_clients 5 --mods_per_client 2 --num_classes 10 \
-  --rounds 20 --batch_size 32 --lr 1e-3 --warmup_epochs 5 \
-  --synthetic_per_class 200 --log_path ./FedBKD/logs
-```
-   该脚本自动完成：客户端 CVAE 训练 → 云端聚合 GMM → 伪样本生成 → 双向蒸馏 → 记录日志/模型（`logs/exp_radioml_FedBKD_<time>/`）。
-
-2) 使用保存的 FedBKD 全局模型按 SNR 测试：
-```bash
-python FedBKD/test.py \
-  --model_path FedBKD/logs/exp_radioml_FedBKD_xxxx/best_global_model.pth \
-  --data_dir /path/to/RML2016.10a_dict.pkl \
-  --num_classes 10 --batch_size 64
-```
-   结果写入 `results/snr_accuracy.xlsx` 的新工作表。
-
 ## 5. 总结 (Conclusion)
 
-本项目提供从数据预处理、联邦训练到按 SNR 细粒度评估的全链路自动调制识别实验框架，并扩展了基于 CVAE+GMM 的数据自由知识蒸馏方案（FedBKD）。未来可考虑：补充更多联邦算法（如 FedAvgM/FedNova）、完善 FedGen 蒸馏投影层与伪数据训练、在 GPU 多进程环境下加速大规模客户端模拟，以及将预处理与训练流程封装为一键脚本或 Notebook，进一步降低上手门槛。
+本项目提供从数据预处理、联邦训练到按 SNR 细粒度评估的全链路自动调制识别实验框架，新增 FDAM 扩散对齐方法。未来可考虑：补充更多联邦算法（如 FedAvgM/FedNova）、完善 FedGen/FDAM 中的蒸馏与对齐策略、在 GPU 多进程环境下加速大规模客户端模拟，以及将预处理与训练流程封装为一键脚本或 Notebook，进一步降低上手门槛。

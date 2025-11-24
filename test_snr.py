@@ -91,7 +91,11 @@ def load_snr_test_data(data_dir, dataset_name):
             # 加载数据
             file_path = os.path.join(test_dir, file)
             with open(file_path, 'rb') as f:
-                X_test, y_test = pickle.load(f)
+                loaded = pickle.load(f)
+                if len(loaded) == 3:
+                    X_test, y_test, _ = loaded
+                else:
+                    X_test, y_test = loaded
             
             snr_data[snr] = (X_test, y_test)
     

@@ -7,10 +7,45 @@
 import os
 import pickle
 import numpy as np
-import h5py
 import argparse
 import gc
-from sklearn.model_selection import train_test_split
+
+# 尝试导入 h5py（仅在处理 RML2018a/HisarMod 时需要）
+try:
+    import h5py  # type: ignore
+except ModuleNotFoundError:
+    h5py = None
+
+# 尝试导入 sklearn 的 train_test_split，不存在时提供简易分层实现
+try:
+    from sklearn.model_selection import train_test_split  # type: ignore
+except ModuleNotFoundError:
+    def train_test_split(X, y, test_size=0.3, stratify=None, random_state=None):
+        """
+        简易版 train_test_split，当 sklearn 不可用时使用。
+        仅支持按比例划分，可选分层。
+        """
+        rng = np.random.default_rng(seed=random_state)
+        indices = np.arange(len(y))
+
+        if stratify is not None:
+            train_idx = []
+            test_idx = []
+            for cls in np.unique(stratify):
+                cls_indices = indices[stratify == cls]
+                rng.shuffle(cls_indices)
+                split = int(len(cls_indices) * (1 - test_size))
+                train_idx.append(cls_indices[:split])
+                test_idx.append(cls_indices[split:])
+            train_idx = np.concatenate(train_idx)
+            test_idx = np.concatenate(test_idx)
+        else:
+            rng.shuffle(indices)
+            split = int(len(indices) * (1 - test_size))
+            train_idx = indices[:split]
+            test_idx = indices[split:]
+
+        return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
 
 
 def load_RML2016_10a(input_dir):
@@ -101,6 +136,9 @@ def load_RML2018a(input_dir):
         mods: 调制类型列表
     """
     file_path = os.path.join(input_dir, 'RML2018a', 'GOLD_XYZ_OSC.0001_1024.hdf5')
+
+    if h5py is None:
+        raise ImportError("缺少 h5py，请安装后处理 RML2018a 数据集")
     
     print(f"加载 {file_path}...")
     with h5py.File(file_path, 'r') as f:
@@ -141,6 +179,9 @@ def load_HisarMod(input_dir):
     """
     train_path = os.path.join(input_dir, 'HisarMod', 'HisarMod2019train.h5')
     test_path = os.path.join(input_dir, 'HisarMod', 'HisarMod2019test.h5')
+
+    if h5py is None:
+        raise ImportError("缺少 h5py，请安装后处理 HisarMod 数据集")
     
     print(f"加载 {train_path} 和 {test_path}...")
     
@@ -233,14 +274,14 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         
         print(f"  训练集: {len(train_X)}, 测试集: {len(test_X)}")
         
-        # 立即保存，减少内存占用
+        # 立即保存，包含原始 SNR，后续 Non-IID SNR 划分直接使用真实值
         train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
         with open(train_file, 'wb') as f:
-            pickle.dump((train_X, train_y), f, protocol=4)
+            pickle.dump((train_X, train_y, np.full(len(train_X), snr_val)), f, protocol=4)
         
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         with open(test_file, 'wb') as f:
-            pickle.dump((test_X, test_y), f, protocol=4)
+            pickle.dump((test_X, test_y, np.full(len(test_X), snr_val)), f, protocol=4)
         
         print(f"  已保存 {int(snr_val)}dB")
         
@@ -272,8 +313,8 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     
     # 1. 所有SNR合并 (100dB)
     print("\n  生成 100dB (所有SNR)...")
-    all_train_X, all_train_y = [], []
-    all_test_X, all_test_y = [], []
+    all_train_X, all_train_y, all_train_snr = [], [], []
+    all_test_X, all_test_y, all_test_snr = [], [], []
     
     for snr_val in sorted(snr_info.keys()):
         # 从文件加载
@@ -281,14 +322,26 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         
         with open(train_file, 'rb') as f:
-            train_X, train_y = pickle.load(f)
+            loaded = pickle.load(f)
+            if len(loaded) == 2:
+                train_X, train_y = loaded
+                train_snr = np.full(len(train_X), snr_val)
+            else:
+                train_X, train_y, train_snr = loaded
             all_train_X.append(train_X)
             all_train_y.append(train_y)
+            all_train_snr.append(train_snr)
         
         with open(test_file, 'rb') as f:
-            test_X, test_y = pickle.load(f)
+            loaded = pickle.load(f)
+            if len(loaded) == 2:
+                test_X, test_y = loaded
+                test_snr = np.full(len(test_X), snr_val)
+            else:
+                test_X, test_y, test_snr = loaded
             all_test_X.append(test_X)
             all_test_y.append(test_y)
+            all_test_snr.append(test_snr)
         
         # 立即释放
         del train_X, train_y, test_X, test_y
@@ -296,14 +349,16 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     
     all_train_X = np.vstack(all_train_X)
     all_train_y = np.concatenate(all_train_y)
+    all_train_snr = np.concatenate(all_train_snr)
     all_test_X = np.vstack(all_test_X)
     all_test_y = np.concatenate(all_test_y)
+    all_test_snr = np.concatenate(all_test_snr)
     
     # 保存 100dB
     with open(os.path.join(train_dir, '100dB.pkl'), 'wb') as f:
-        pickle.dump((all_train_X, all_train_y), f, protocol=4)
+        pickle.dump((all_train_X, all_train_y, all_train_snr), f, protocol=4)
     with open(os.path.join(test_dir, '100dB.pkl'), 'wb') as f:
-        pickle.dump((all_test_X, all_test_y), f, protocol=4)
+        pickle.dump((all_test_X, all_test_y, all_test_snr), f, protocol=4)
     
     print(f"    训练集: {all_train_X.shape}, 测试集: {all_test_X.shape}")
     
@@ -313,8 +368,8 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     
     # 2. 高SNR合并 (highsnr: SNR > 0)
     print("\n  生成 highsnr (SNR > 0)...")
-    high_train_X, high_train_y = [], []
-    high_test_X, high_test_y = [], []
+    high_train_X, high_train_y, high_train_snr = [], [], []
+    high_test_X, high_test_y, high_test_snr = [], [], []
     
     for snr_val in sorted(snr_info.keys()):
         if snr_val > 0:
@@ -323,14 +378,26 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
             test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
             
             with open(train_file, 'rb') as f:
-                train_X, train_y = pickle.load(f)
+                loaded = pickle.load(f)
+                if len(loaded) == 2:
+                    train_X, train_y = loaded
+                    train_snr = np.full(len(train_X), snr_val)
+                else:
+                    train_X, train_y, train_snr = loaded
                 high_train_X.append(train_X)
                 high_train_y.append(train_y)
+                high_train_snr.append(train_snr)
             
             with open(test_file, 'rb') as f:
-                test_X, test_y = pickle.load(f)
+                loaded = pickle.load(f)
+                if len(loaded) == 2:
+                    test_X, test_y = loaded
+                    test_snr = np.full(len(test_X), snr_val)
+                else:
+                    test_X, test_y, test_snr = loaded
                 high_test_X.append(test_X)
                 high_test_y.append(test_y)
+                high_test_snr.append(test_snr)
             
             # 立即释放
             del train_X, train_y, test_X, test_y
@@ -339,14 +406,16 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     if high_train_X:
         high_train_X = np.vstack(high_train_X)
         high_train_y = np.concatenate(high_train_y)
+        high_train_snr = np.concatenate(high_train_snr)
         high_test_X = np.vstack(high_test_X)
         high_test_y = np.concatenate(high_test_y)
+        high_test_snr = np.concatenate(high_test_snr)
         
         # 保存 highsnr
         with open(os.path.join(train_dir, 'highsnr.pkl'), 'wb') as f:
-            pickle.dump((high_train_X, high_train_y), f, protocol=4)
+            pickle.dump((high_train_X, high_train_y, high_train_snr), f, protocol=4)
         with open(os.path.join(test_dir, 'highsnr.pkl'), 'wb') as f:
-            pickle.dump((high_test_X, high_test_y), f, protocol=4)
+            pickle.dump((high_test_X, high_test_y, high_test_snr), f, protocol=4)
         
         print(f"    训练集: {high_train_X.shape}, 测试集: {high_test_X.shape}")
         

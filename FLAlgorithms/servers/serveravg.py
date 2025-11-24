@@ -7,9 +7,6 @@ import torch
 import copy
 from collections import OrderedDict
 from FLAlgorithms.servers.serverbase import Server
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from utils.model_utils import average_weights
 
 

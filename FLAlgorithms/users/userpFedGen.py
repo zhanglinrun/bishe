@@ -22,7 +22,7 @@ class UserFedGen(User):
     """
     
     def __init__(self, user_id, model, generator, train_loader, learning_rate, 
-                 gen_learning_rate, device='cpu', latent_dim=100,
+                 gen_learning_rate, device='cpu', latent_dim=100, feature_dim=256,
                  optimizer_type='adam', momentum=0.9, weight_decay=1e-4):
         """
         Args:
@@ -42,9 +42,13 @@ class UserFedGen(User):
                                         optimizer_type, momentum, weight_decay)
         
         self.generator = generator.to(device)
+        self.feature_dim = feature_dim
         # 生成器始终使用 Adam（生成模型的标准做法）
         self.gen_optimizer = torch.optim.Adam(self.generator.parameters(), lr=gen_learning_rate)
         self.latent_dim = latent_dim
+        self.num_classes = model.num_classes
+        # 生成器输出到类别空间的投影，用于蒸馏与伪标签
+        self.gen_projection = nn.Linear(self.generator.embedding_dim, self.num_classes).to(device)
         
         # 用于知识蒸馏的温度参数
         self.temperature = 2.0
@@ -61,6 +65,9 @@ class UserFedGen(User):
             gen_params: 生成器参数
         """
         self.generator.load_state_dict(copy.deepcopy(gen_params))
+
+    def set_projection_parameters(self, proj_params):
+        self.gen_projection.load_state_dict(copy.deepcopy(proj_params))
     
     def get_generator_parameters(self):
         """
@@ -70,6 +77,9 @@ class UserFedGen(User):
             生成器参数
         """
         return copy.deepcopy(self.generator.state_dict())
+
+    def get_projection_parameters(self):
+        return copy.deepcopy(self.gen_projection.state_dict())
     
     def train(self, epochs, gen_ratio=0.5, gen_epochs=1):
         """
@@ -106,6 +116,7 @@ class UserFedGen(User):
             平均损失
         """
         self.generator.train()
+        self.gen_projection.train()
         self.model.eval()  # 固定分类器
         
         total_loss = 0.0
@@ -127,21 +138,7 @@ class UserFedGen(User):
                 with torch.no_grad():
                     real_outputs = self.model(X)
                 
-                # 使用一个简单的投影层将生成的嵌入转换为 logits
-                # 这里简化处理，假设生成器直接生成与分类器输出维度相同的特征
-                # 在实际中，可能需要添加额外的投影层
-                
-                # 计算 KL 散度损失（知识蒸馏）
-                # 这里使用 MSE 损失作为简化
-                # 更准确的实现应该使用 KL 散度
-                fake_logits = fake_embeddings  # 简化：假设生成器输出与 logits 维度相同
-                
-                # 为了让这个工作，我们需要调整生成器输出维度
-                # 这里使用一个简单的投影
-                if not hasattr(self, 'gen_projection'):
-                    # 动态创建投影层
-                    self.gen_projection = nn.Linear(fake_embeddings.size(1), real_outputs.size(1)).to(self.device)
-                
+                # 生成器预测的 logits，通过投影到类别空间
                 fake_logits = self.gen_projection(fake_embeddings)
                 
                 # 知识蒸馏损失（使用 softmax 温度缩放）
@@ -173,6 +170,7 @@ class UserFedGen(User):
         """
         self.model.train()
         self.generator.eval()  # 固定生成器
+        self.gen_projection.eval()
         
         total_loss = 0.0
         num_batches = 0
@@ -189,26 +187,25 @@ class UserFedGen(User):
                 real_outputs = self.model(X)
                 real_loss = self.criterion(real_outputs, y)
                 
-                # 生成伪数据并计算损失
+                # 生成伪特征并蒸馏到分类器（仅更新分类头）
                 gen_batch_size = int(batch_size * gen_ratio)
+                kd_loss = torch.tensor(0.0, device=self.device)
                 if gen_batch_size > 0:
                     with torch.no_grad():
                         z = torch.randn(gen_batch_size, self.latent_dim, device=self.device)
                         fake_embeddings = self.generator(z)
-                    
-                    # 投影到 logits 空间（如果需要）
-                    if hasattr(self, 'gen_projection'):
-                        fake_logits = self.gen_projection(fake_embeddings)
-                        # 使用伪标签（从 fake_logits 推导）
-                        pseudo_labels = torch.argmax(fake_logits, dim=1)
-                        
-                        # 注意：这里的实现较为简化
-                        # 更好的方法是让生成器直接生成输入数据，或使用更复杂的蒸馏策略
-                        # 由于我们生成的是特征/logits而非原始输入，这里跳过生成数据的训练
-                        pass
+                        teacher_logits = self.gen_projection(fake_embeddings)
+
+                    # 使用生成的伪特征直接通过分类头，提升模型对未见分布的鲁棒性
+                    student_logits = self.model.classify_from_features(fake_embeddings)
+                    kd_loss = F.kl_div(
+                        F.log_softmax(student_logits / self.temperature, dim=1),
+                        F.softmax(teacher_logits / self.temperature, dim=1),
+                        reduction='batchmean'
+                    ) * (self.temperature ** 2)
                 
-                # 总损失（这里简化为只使用真实数据）
-                loss = real_loss
+                # 总损失 = 真实数据交叉熵 + 蒸馏损失
+                loss = real_loss + gen_ratio * kd_loss
                 
                 # 反向传播
                 loss.backward()
