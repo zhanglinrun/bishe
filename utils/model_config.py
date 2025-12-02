@@ -11,9 +11,9 @@ DATASET_CONFIG = {
         'classes': ['8PSK', 'AM-DSB', 'AM-SSB', 'BPSK', 'CPFSK', 'GFSK', 'PAM4', 'QAM16', 'QAM64', 'QPSK', 'WBFM']
     },
     'RML2016.10b': {
-        'num_classes': 11,
+        'num_classes': 10,
         'signal_length': 128,
-        'classes': ['8PSK', 'AM-DSB', 'AM-SSB', 'BPSK', 'CPFSK', 'GFSK', 'PAM4', 'QAM16', 'QAM64', 'QPSK', 'WBFM']
+        'classes': ['8PSK', 'AM-DSB', 'BPSK', 'CPFSK', 'GFSK', 'PAM4', 'QAM16', 'QAM64', 'QPSK', 'WBFM']
     },
     'RML2018a': {
         'num_classes': 24,
