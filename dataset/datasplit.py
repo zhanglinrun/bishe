@@ -179,7 +179,7 @@ def _load_hisar_file(file_path):
     return X, y.astype(np.int64), snr
 
 
-def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, random_state=42):
+def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size, random_state):
     """
     按SNR分割数据集并立即保存
     
@@ -223,9 +223,11 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         unique, counts = np.unique(y_snr, return_counts=True)
         print(f"  类别分布: {dict(zip(unique, counts))}")
         
+        snr_snr = np.full(len(y_snr), snr_val)
+        
         # 分层抽样划分
-        train_X, test_X, train_y, test_y = train_test_split(
-            X_snr, y_snr,
+        train_X, test_X, train_y, test_y, train_snr, test_snr = train_test_split(
+            X_snr, y_snr, snr_snr,
             test_size=test_size,
             stratify=y_snr,
             random_state=random_state
@@ -236,11 +238,11 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         # 立即保存，减少内存占用
         train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
         with open(train_file, 'wb') as f:
-            pickle.dump((train_X, train_y), f, protocol=4)
+            pickle.dump((train_X, train_y, train_snr), f, protocol=4)
         
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         with open(test_file, 'wb') as f:
-            pickle.dump((test_X, test_y), f, protocol=4)
+            pickle.dump((test_X, test_y, test_snr), f, protocol=4)
         
         print(f"  已保存 {int(snr_val)}dB")
         
@@ -248,7 +250,7 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         snr_info[snr_val] = (train_X.shape, test_X.shape)
         
         # 释放内存
-        del X_snr, y_snr, train_X, test_X, train_y, test_y
+        del X_snr, y_snr, snr_snr, train_X, test_X, train_y, test_y, train_snr, test_snr
         gc.collect()
     
     return snr_info
@@ -272,100 +274,92 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     
     # 1. 所有SNR合并 (100dB)
     print("\n  生成 100dB (所有SNR)...")
-    all_train_X, all_train_y = [], []
-    all_test_X, all_test_y = [], []
+    all_train_X, all_train_y, all_train_snr = [], [], []
+    all_test_X, all_test_y, all_test_snr = [], [], []
     
     for snr_val in sorted(snr_info.keys()):
-        # 从文件加载
         train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         
         with open(train_file, 'rb') as f:
-            train_X, train_y = pickle.load(f)
+            train_X, train_y, train_snr = pickle.load(f)
             all_train_X.append(train_X)
             all_train_y.append(train_y)
+            all_train_snr.append(train_snr)
         
         with open(test_file, 'rb') as f:
-            test_X, test_y = pickle.load(f)
+            test_X, test_y, test_snr = pickle.load(f)
             all_test_X.append(test_X)
             all_test_y.append(test_y)
+            all_test_snr.append(test_snr)
         
-        # 立即释放
-        del train_X, train_y, test_X, test_y
+        del train_X, train_y, train_snr, test_X, test_y, test_snr
         gc.collect()
     
     all_train_X = np.vstack(all_train_X)
     all_train_y = np.concatenate(all_train_y)
+    all_train_snr = np.concatenate(all_train_snr)
     all_test_X = np.vstack(all_test_X)
     all_test_y = np.concatenate(all_test_y)
+    all_test_snr = np.concatenate(all_test_snr)
     
-    # 保存 100dB
     with open(os.path.join(train_dir, '100dB.pkl'), 'wb') as f:
-        pickle.dump((all_train_X, all_train_y), f, protocol=4)
+        pickle.dump((all_train_X, all_train_y, all_train_snr), f, protocol=4)
     with open(os.path.join(test_dir, '100dB.pkl'), 'wb') as f:
-        pickle.dump((all_test_X, all_test_y), f, protocol=4)
+        pickle.dump((all_test_X, all_test_y, all_test_snr), f, protocol=4)
     
     print(f"    训练集: {all_train_X.shape}, 测试集: {all_test_X.shape}")
     
-    # 释放内存
-    del all_train_X, all_train_y, all_test_X, all_test_y
+    del all_train_X, all_train_y, all_train_snr, all_test_X, all_test_y, all_test_snr
     gc.collect()
     
     # 2. 高SNR合并 (highsnr: SNR > 0)
     print("\n  生成 highsnr (SNR > 0)...")
-    high_train_X, high_train_y = [], []
-    high_test_X, high_test_y = [], []
+    high_train_X, high_train_y, high_train_snr = [], [], []
+    high_test_X, high_test_y, high_test_snr = [], [], []
     
     for snr_val in sorted(snr_info.keys()):
         if snr_val > 0:
-            # 从文件加载
             train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
             test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
             
             with open(train_file, 'rb') as f:
-                train_X, train_y = pickle.load(f)
+                train_X, train_y, train_snr = pickle.load(f)
                 high_train_X.append(train_X)
                 high_train_y.append(train_y)
+                high_train_snr.append(train_snr)
             
             with open(test_file, 'rb') as f:
-                test_X, test_y = pickle.load(f)
+                test_X, test_y, test_snr = pickle.load(f)
                 high_test_X.append(test_X)
                 high_test_y.append(test_y)
+                high_test_snr.append(test_snr)
             
-            # 立即释放
-            del train_X, train_y, test_X, test_y
+            del train_X, train_y, train_snr, test_X, test_y, test_snr
             gc.collect()
     
     if high_train_X:
         high_train_X = np.vstack(high_train_X)
         high_train_y = np.concatenate(high_train_y)
+        high_train_snr = np.concatenate(high_train_snr)
         high_test_X = np.vstack(high_test_X)
         high_test_y = np.concatenate(high_test_y)
+        high_test_snr = np.concatenate(high_test_snr)
         
-        # 保存 highsnr
         with open(os.path.join(train_dir, 'highsnr.pkl'), 'wb') as f:
-            pickle.dump((high_train_X, high_train_y), f, protocol=4)
+            pickle.dump((high_train_X, high_train_y, high_train_snr), f, protocol=4)
         with open(os.path.join(test_dir, 'highsnr.pkl'), 'wb') as f:
-            pickle.dump((high_test_X, high_test_y), f, protocol=4)
+            pickle.dump((high_test_X, high_test_y, high_test_snr), f, protocol=4)
         
         print(f"    训练集: {high_train_X.shape}, 测试集: {high_test_X.shape}")
         
-        # 释放内存
-        del high_train_X, high_train_y, high_test_X, high_test_y
+        del high_train_X, high_train_y, high_train_snr, high_test_X, high_test_y, high_test_snr
         gc.collect()
     else:
         print("    没有SNR > 0的数据")
 
 
-def process_dataset(dataset_name, input_dir, output_dir):
-    """
-    处理单个数据集
-    
-    Args:
-        dataset_name: 数据集名称
-        input_dir: 输入目录
-        output_dir: 输出目录
-    """
+def process_dataset(dataset_name, input_dir, output_dir, test_size, random_state):
     print("=" * 80)
     print(f"处理数据集: {dataset_name}")
     print("=" * 80)
@@ -383,7 +377,7 @@ def process_dataset(dataset_name, input_dir, output_dir):
         raise ValueError(f"未知数据集: {dataset_name}")
     
     # 按SNR分割并立即保存
-    snr_info = split_and_save_by_snr(X, y, snr, output_dir, dataset_name)
+    snr_info = split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size, random_state)
     
     # 释放原始数据
     del X, y, snr, mods
@@ -405,6 +399,10 @@ def main():
                        help='原始数据集目录（默认：dataset）')
     parser.add_argument('--output_dir', type=str, default='data_processed',
                        help='输出目录（默认：data_processed）')
+    parser.add_argument('--test_size', type=float, default=0.3,
+                       help='测试集比例（默认：0.3）')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='随机种子（默认：42）')
     
     args = parser.parse_args()
     
@@ -413,6 +411,8 @@ def main():
     print("=" * 80)
     print(f"输入目录: {args.input_dir}")
     print(f"输出目录: {args.output_dir}")
+    print(f"测试集比例: {args.test_size}")
+    print(f"随机种子: {args.seed}")
     print("=" * 80)
     
     # 处理数据集
@@ -420,12 +420,12 @@ def main():
         datasets = ['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod']
         for dataset in datasets:
             try:
-                process_dataset(dataset, args.input_dir, args.output_dir)
+                process_dataset(dataset, args.input_dir, args.output_dir, args.test_size, args.seed)
             except Exception as e:
                 print(f"\n[错误] 处理 {dataset} 时出错: {e}")
                 print("跳过此数据集，继续处理下一个...\n")
     else:
-        process_dataset(args.dataset, args.input_dir, args.output_dir)
+        process_dataset(args.dataset, args.input_dir, args.output_dir, args.test_size, args.seed)
     
     print("\n" + "=" * 80)
     print("所有数据集处理完成！")

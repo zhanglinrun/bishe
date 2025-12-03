@@ -50,16 +50,16 @@ def parse_args():
                        help='联邦学习算法')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='MCLDNN',
+    parser.add_argument('--model', type=str, default='CNN1D',
                        choices=['CNN1D', 'ResNet1D', 'MCLDNN'],
                        help='模型架构')
     
     # 联邦学习参数
-    parser.add_argument('--num_clients', type=int, default=10,
+    parser.add_argument('--num_clients', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--num_rounds', type=int, default=40,
+    parser.add_argument('--num_rounds', type=int, default=100,
                        help='训练轮次')
-    parser.add_argument('--local_epochs', type=int, default=10,
+    parser.add_argument('--local_epochs', type=int, default=2,
                        help='本地训练轮数')
     
     # 训练参数
@@ -69,7 +69,7 @@ def parse_args():
                        help='学习率')
     
     # 优化器参数
-    parser.add_argument('--optimizer', type=str, default='adamw',
+    parser.add_argument('--optimizer', type=str, default='adam',
                        choices=['sgd', 'adam', 'adamw'],
                        help='优化器类型（默认：adam）')
     parser.add_argument('--momentum', type=float, default=0.9,
@@ -78,7 +78,7 @@ def parse_args():
                        help='权重衰减（L2 正则化）')
     
     # Non-IID 参数
-    parser.add_argument('--non_iid_type', type=str, default='iid',
+    parser.add_argument('--non_iid_type', type=str, default='class',
                        choices=['iid', 'class', 'snr'],
                        help='数据划分类型')
     parser.add_argument('--alpha', type=float, default=0.5,
@@ -362,7 +362,7 @@ def main():
         logger.removeHandler(handler)
     
     # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
-    params_str = f"{args.num_clients}_{arg.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
+    params_str = f"{args.num_clients}_{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
     final_dirname = f"{args.dataset}_{args.data_snr}_{args.algorithm}_{args.model}_{final_acc:.2f}pct_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
     

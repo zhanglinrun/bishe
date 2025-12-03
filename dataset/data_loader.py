@@ -188,7 +188,7 @@ def split_data_iid(X, y, snr, num_clients):
     
     client_data = []
     for client_idx in split_indices:
-        client_data.append((X[client_idx], y[client_idx]))
+        client_data.append((X[client_idx], y[client_idx], snr[client_idx]))
     
     return client_data
 
@@ -232,38 +232,46 @@ def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
     for client_id in range(num_clients):
         indices = np.array(client_data[client_id])
         np.random.shuffle(indices)
-        result.append((X[indices], y[indices]))
+        result.append((X[indices], y[indices], snr[indices]))
     
     return result
 
 
-def split_data_non_iid_snr(X, y, snr, num_clients):
+def split_data_non_iid_snr(X, y, snr, num_clients, alpha=0.5):
     """
-    按 SNR 范围 Non-IID 划分：不同客户端获得不同 SNR 范围的数据
+    按 SNR Non-IID 划分：使用 Dirichlet 分布
     
     Args:
         X: 数据
         y: 标签
         snr: SNR 值
         num_clients: 客户端数量
+        alpha: Dirichlet 分布参数（越小越不均衡）
         
     Returns:
-        client_data: 列表，每个元素是 (X_client, y_client)
+        client_data: 列表，每个元素是 (X_client, y_client, snr_client)
     """
-    # 获取 SNR 的范围
     unique_snrs = np.sort(np.unique(snr))
+    client_data = [[] for _ in range(num_clients)]
     
-    # 将 SNR 划分为 num_clients 段
-    snr_splits = np.array_split(unique_snrs, num_clients)
+    for snr_val in unique_snrs:
+        snr_indices = np.where(snr == snr_val)[0]
+        np.random.shuffle(snr_indices)
+        
+        proportions = np.random.dirichlet(alpha * np.ones(num_clients))
+        proportions = (np.cumsum(proportions) * len(snr_indices)).astype(int)[:-1]
+        split_indices = np.split(snr_indices, proportions)
+        
+        for client_id, idx in enumerate(split_indices):
+            client_data[client_id].extend(idx.tolist())
     
-    client_data = []
-    for snr_range in snr_splits:
-        # 找到该 SNR 范围内的所有样本
-        mask = np.isin(snr, snr_range)
-        indices = np.where(mask)[0]
-        client_data.append((X[indices], y[indices]))
+    result = []
+    for client_id in range(num_clients):
+        indices = np.array(client_data[client_id])
+        np.random.shuffle(indices)
+        result.append((X[indices], y[indices], snr[indices]))
     
-    return client_data
+    return result
 
 
 def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
@@ -286,17 +294,15 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     train_file = os.path.join(data_dir, dataset_name, 'train', f'{data_snr}.pkl')
     test_file = os.path.join(data_dir, dataset_name, 'test', f'{data_snr}.pkl')
     
-    # 加载训练集
     if not os.path.exists(train_file):
         raise FileNotFoundError(f"训练集文件不存在: {train_file}")
     with open(train_file, 'rb') as f:
-        X_train, y_train = pickle.load(f)
+        X_train, y_train, snr_train = pickle.load(f)
     
-    # 加载测试集
     if not os.path.exists(test_file):
         raise FileNotFoundError(f"测试集文件不存在: {test_file}")
     with open(test_file, 'rb') as f:
-        X_test, y_test = pickle.load(f)
+        X_test, y_test, snr_test = pickle.load(f)
     
     # 获取类别数
     config = get_dataset_config(dataset_name)
@@ -308,7 +314,7 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     print(f"  训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
     print(f"  数据形状: {X_train.shape}")
     
-    return X_train, y_train, X_test, y_test, num_classes
+    return X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes
 
 
 def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid', 
@@ -330,15 +336,9 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
         test_loader: 全局测试集 DataLoader
         num_classes: 类别数
     """
-    # 加载预处理的数据
-    X_train, y_train, X_test, y_test, num_classes = load_preprocessed_data(
+    X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes = load_preprocessed_data(
         dataset_name, data_snr, data_dir
     )
-    
-    # 为 Non-IID SNR 划分创建虚拟 SNR 数组（用于兼容性）
-    # 注意：如果使用 'snr' Non-IID 类型，需要实际的 SNR 值
-    # 这里我们创建一个均匀分布的虚拟 SNR 用于划分
-    snr_train = np.linspace(-20, 20, len(y_train))
     
     # 划分客户端数据
     if non_iid_type == 'iid':
@@ -346,13 +346,13 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
     elif non_iid_type == 'class':
         client_data = split_data_non_iid_class(X_train, y_train, snr_train, num_clients, alpha)
     elif non_iid_type == 'snr':
-        client_data = split_data_non_iid_snr(X_train, y_train, snr_train, num_clients)
+        client_data = split_data_non_iid_snr(X_train, y_train, snr_train, num_clients, alpha)
     else:
         raise ValueError(f"未知的 Non-IID 类型: {non_iid_type}")
     
     # 创建客户端 DataLoader
     train_loaders = []
-    for X_client, y_client in client_data:
+    for X_client, y_client, snr_client in client_data:
         dataset = SignalDataset(X_client, y_client)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
         train_loaders.append(loader)

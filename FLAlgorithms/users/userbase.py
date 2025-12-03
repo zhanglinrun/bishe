@@ -27,7 +27,7 @@ class User:
             weight_decay: 权重衰减（L2 正则化）
         """
         self.id = user_id
-        self.model = model.to(device)
+        self.model = copy.deepcopy(model).to(device)
         self.train_loader = train_loader
         self.learning_rate = learning_rate
         self.device = device
