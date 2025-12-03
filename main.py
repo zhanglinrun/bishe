@@ -20,6 +20,7 @@ from FLAlgorithms.trainmodel.generator import Generator
 from FLAlgorithms.users.useravg import UserAVG
 from FLAlgorithms.users.userFedProx import UserFedProx
 from FLAlgorithms.users.userpFedGen import UserFedGen
+from FLAlgorithms.servers.serverfeddiff import ServerFedDiff
 
 # 导入服务器
 from FLAlgorithms.servers.serveravg import ServerAVG
@@ -46,7 +47,7 @@ def parse_args():
     
     # 算法参数
     parser.add_argument('--algorithm', type=str, default='FedAvg',
-                       choices=['FedAvg', 'FedProx', 'FedGen'],
+                       choices=['FedAvg', 'FedProx', 'FedGen', 'FedDiff'],
                        help='联邦学习算法')
     
     # 模型参数
@@ -93,6 +94,16 @@ def parse_args():
                        help='生成器学习率')
     parser.add_argument('--latent_dim', type=int, default=100,
                        help='潜在向量维度')
+
+    # FedDiff 参数
+    parser.add_argument('--pseudo_batch_size', type=int, default=32,
+                       help='扩散生成伪样本的批大小')
+    parser.add_argument('--distill_steps', type=int, default=1,
+                       help='每轮扩散蒸馏步数')
+    parser.add_argument('--distill_lr', type=float, default=0.001,
+                       help='蒸馏阶段学习率')
+    parser.add_argument('--diffusion_steps', type=int, default=50,
+                       help='扩散时间步数')
     
     # 输出参数
     parser.add_argument('--output_dir', type=str, default='./results',
@@ -190,7 +201,21 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
                 weight_decay=args.weight_decay
             )
             users.append(user)
-    
+
+    elif algorithm == 'FedDiff':
+        for i in range(num_clients):
+            user = UserAVG(
+                user_id=i,
+                model=get_model(args.model, model.num_classes, model.signal_length),
+                train_loader=train_loaders[i],
+                learning_rate=args.learning_rate,
+                device=args.device,
+                optimizer_type=args.optimizer,
+                momentum=args.momentum,
+                weight_decay=args.weight_decay
+            )
+            users.append(user)
+
     return users
 
 
@@ -230,7 +255,7 @@ def create_server(algorithm, model, users, args):
             embedding_dim=256,
             hidden_dim=512
         )
-        
+
         server = ServerFedGen(
             model=model,
             generator=generator,
@@ -238,7 +263,19 @@ def create_server(algorithm, model, users, args):
             num_rounds=args.num_rounds,
             device=args.device
         )
-    
+
+    elif algorithm == 'FedDiff':
+        server = ServerFedDiff(
+            model=model,
+            users=users,
+            num_rounds=args.num_rounds,
+            device=args.device,
+            pseudo_batch_size=args.pseudo_batch_size,
+            distill_steps=args.distill_steps,
+            distill_lr=args.distill_lr,
+            diffusion_steps=args.diffusion_steps,
+        )
+
     return server
 
 
