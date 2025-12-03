@@ -20,12 +20,13 @@ from FLAlgorithms.trainmodel.generator import Generator
 from FLAlgorithms.users.useravg import UserAVG
 from FLAlgorithms.users.userFedProx import UserFedProx
 from FLAlgorithms.users.userpFedGen import UserFedGen
-from FLAlgorithms.servers.serverfeddiff import ServerFedDiff
+from FLAlgorithms.users.userFedDiff import UserFedDiff
 
 # 导入服务器
 from FLAlgorithms.servers.serveravg import ServerAVG
 from FLAlgorithms.servers.serverFedProx import ServerFedProx
 from FLAlgorithms.servers.serverpFedGen import ServerFedGen
+from FLAlgorithms.servers.serverfeddiff import ServerFedDiff
 
 # 导入工具函数
 from utils.model_config import get_dataset_config
@@ -56,7 +57,7 @@ def parse_args():
                        help='模型架构')
     
     # 联邦学习参数
-    parser.add_argument('--num_clients', type=int, default=5,
+    parser.add_argument('--num_clients', type=int, default=10,
                        help='客户端数量')
     parser.add_argument('--num_rounds', type=int, default=100,
                        help='训练轮次')
@@ -82,7 +83,7 @@ def parse_args():
     parser.add_argument('--non_iid_type', type=str, default='class',
                        choices=['iid', 'class', 'snr'],
                        help='数据划分类型')
-    parser.add_argument('--alpha', type=float, default=0.5,
+    parser.add_argument('--alpha', type=float, default=0.1,
                        help='Dirichlet 参数（用于 class Non-IID）')
     
     # FedProx 参数
@@ -94,7 +95,7 @@ def parse_args():
                        help='生成器学习率')
     parser.add_argument('--latent_dim', type=int, default=100,
                        help='潜在向量维度')
-
+                       
     # FedDiff 参数
     parser.add_argument('--pseudo_batch_size', type=int, default=32,
                        help='扩散生成伪样本的批大小')
@@ -104,12 +105,13 @@ def parse_args():
                        help='蒸馏阶段学习率')
     parser.add_argument('--diffusion_steps', type=int, default=50,
                        help='扩散时间步数')
-    
     # 输出参数
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='输出目录')
     
     # 设备参数
+    parser.add_argument('--gpu_id', type=int, default=3,
+                       help='指定使用的GPU ID')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='设备 (cuda 或 cpu)')
     
@@ -204,7 +206,7 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
 
     elif algorithm == 'FedDiff':
         for i in range(num_clients):
-            user = UserAVG(
+            user = UserFedDiff(
                 user_id=i,
                 model=get_model(args.model, model.num_classes, model.signal_length),
                 train_loader=train_loaders[i],
@@ -212,7 +214,9 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
                 device=args.device,
                 optimizer_type=args.optimizer,
                 momentum=args.momentum,
-                weight_decay=args.weight_decay
+                weight_decay=args.weight_decay,
+                diffusion_steps=args.diffusion_steps,
+                gen_learning_rate=args.distill_lr
             )
             users.append(user)
 
@@ -255,7 +259,7 @@ def create_server(algorithm, model, users, args):
             embedding_dim=256,
             hidden_dim=512
         )
-
+        
         server = ServerFedGen(
             model=model,
             generator=generator,
@@ -283,6 +287,11 @@ def main():
     """主函数"""
     # 解析参数
     args = parse_args()
+    
+    # 设置GPU
+    if args.device == 'cuda' and torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu_id)
+        args.device = f'cuda:{args.gpu_id}'
     
     # 设置随机种子
     set_seed(args.seed)

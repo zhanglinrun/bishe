@@ -38,7 +38,6 @@ class ServerFedDiff(ServerAVG):
         ).to(device)
 
         self.model_optimizer = torch.optim.Adam(self.model.parameters(), lr=distill_lr)
-        self.generator_optimizer = torch.optim.Adam(self.generator.parameters(), lr=distill_lr)
         self.kldiv = nn.KLDivLoss(reduction="batchmean")
 
     def aggregate_parameters(self):
@@ -55,6 +54,24 @@ class ServerFedDiff(ServerAVG):
         global_params = average_weights(client_params, client_weights)
         self.model.load_state_dict(global_params)
 
+    def aggregate_generator_parameters(self):
+        gen_params: List[dict] = []
+        gen_weights: List[float] = []
+        total_samples = 0
+        for user in self.users:
+            gen_params.append(user.get_generator_parameters())
+            num_samples = user.get_num_samples()
+            gen_weights.append(num_samples)
+            total_samples += num_samples
+        gen_weights = [w / total_samples for w in gen_weights]
+        global_gen_params = average_weights(gen_params, gen_weights)
+        self.generator.load_state_dict(global_gen_params)
+
+    def send_generator_parameters(self):
+        gen_params = self.generator.state_dict()
+        for user in self.users:
+            user.set_generator_parameters(gen_params)
+
     def _collect_teacher_probs(self, pseudo_data: torch.Tensor) -> torch.Tensor:
         teacher_logits = []
         with torch.no_grad():
@@ -64,7 +81,7 @@ class ServerFedDiff(ServerAVG):
         stacked = torch.stack([torch.softmax(logits, dim=1) for logits in teacher_logits], dim=0)
         return torch.mean(stacked, dim=0)
 
-    def _distill_once(self) -> tuple[float, float]:
+    def _distill_once(self) -> float:
         labels = torch.randint(0, self.num_classes, (self.pseudo_batch_size,), device=self.device)
         pseudo_data = self.generator.sample(self.pseudo_batch_size, labels, device=self.device)
 
@@ -76,22 +93,7 @@ class ServerFedDiff(ServerAVG):
         kd_loss.backward()
         self.model_optimizer.step()
 
-        for param in self.model.parameters():
-            param.requires_grad = False
-        pseudo_for_generator = self.generator.sample(self.pseudo_batch_size, labels, device=self.device)
-        teacher_probs_g = self._collect_teacher_probs(pseudo_for_generator)
-        student_logits_g = self.model(pseudo_for_generator)
-        generator_loss = -self.kldiv(
-            torch.log_softmax(student_logits_g, dim=1), teacher_probs_g
-        )
-
-        self.generator_optimizer.zero_grad()
-        generator_loss.backward()
-        self.generator_optimizer.step()
-        for param in self.model.parameters():
-            param.requires_grad = True
-
-        return kd_loss.item(), generator_loss.item()
+        return kd_loss.item()
 
     def train(self, test_loader, local_epochs, logger=None):  # type: ignore[override]
         for round_num in range(1, self.num_rounds + 1):
@@ -104,15 +106,14 @@ class ServerFedDiff(ServerAVG):
 
             avg_local_loss = sum(local_losses) / len(local_losses)
             self.aggregate_parameters()
+            self.aggregate_generator_parameters()
 
             kd_losses = []
-            gen_losses = []
             if self.distill_steps > 0:
                 self.model.train()
                 for _ in range(self.distill_steps):
-                    kd_loss, gen_loss = self._distill_once()
+                    kd_loss = self._distill_once()
                     kd_losses.append(kd_loss)
-                    gen_losses.append(gen_loss)
 
             accuracy, test_loss = self.evaluate(test_loader)
             self.train_losses.append(test_loss)
@@ -126,8 +127,6 @@ class ServerFedDiff(ServerAVG):
             )
             if kd_losses:
                 message += f" | KD Loss: {sum(kd_losses) / len(kd_losses):.4f}"
-            if gen_losses:
-                message += f" | Gen Loss: {sum(gen_losses) / len(gen_losses):.4f}"
 
             if logger:
                 logger.info(message)
