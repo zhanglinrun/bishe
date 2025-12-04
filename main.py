@@ -100,19 +100,19 @@ def parse_args():
                        help='潜在向量维度')
                        
     # FedDiff 参数
-    parser.add_argument('--pseudo_batch_size', type=int, default=16,
+    parser.add_argument('--pseudo_batch_size', type=int, default=8,
                        help='扩散生成伪样本的批大小')
-    parser.add_argument('--distill_steps', type=int, default=5,
+    parser.add_argument('--distill_steps', type=int, default=2,
                        help='每轮扩散蒸馏步数')
-    parser.add_argument('--distill_lr', type=float, default=0.001,
+    parser.add_argument('--distill_lr', type=float, default=0.0001,
                        help='蒸馏阶段学习率')
-    parser.add_argument('--pseudo_start_round', type=int, default=12,
+    parser.add_argument('--pseudo_start_round', type=int, default=20,
                        help='从第几轮开始使用生成伪样本训练全局模型（FedDiff 稳定性）')
-    parser.add_argument('--pseudo_conf_thresh', type=float, default=0.9,
+    parser.add_argument('--pseudo_conf_thresh', type=float, default=0.95,
                        help='仅对置信度高于阈值的伪样本进行自训练')
-    parser.add_argument('--pseudo_loss_weight', type=float, default=0.1,
+    parser.add_argument('--pseudo_loss_weight', type=float, default=0.05,
                        help='伪样本自训练损失权重，避免破坏真实数据学习')
-    parser.add_argument('--pseudo_ramp_rounds', type=int, default=8,
+    parser.add_argument('--pseudo_ramp_rounds', type=int, default=10,
                        help='伪样本蒸馏的热身轮数，逐步增加步数与权重以防早期破坏')
     # parser.add_argument('--diffusion_steps', type=int, default=50,
     #                    help='扩散时间步数')

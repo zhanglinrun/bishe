@@ -1,5 +1,10 @@
-"""扩散生成器实现，用于基于扩散模型的伪数据生成。"""
-from __future__ import annotations
+"""KCDM: 知识条件扩散生成器，依据 I4D（Improved Distribution Difference Driven Diffusion）思路实现。
+核心包含：
+- 线性 beta 调度（论文默认 T=1000, beta_min=1e-4, beta_max=2e-2）。
+- 时间/调制标签双 MLP 条件嵌入 (Eq.14)。
+- 1D 条件噪声预测网络 epsilon_theta (Eq.16)。
+- 反向采样公式 (Eq.15)，可选分类器引导。
+"""
 
 import math
 from typing import Optional
@@ -9,71 +14,69 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def sinusoidal_embedding(timesteps: torch.Tensor, dim: int = 64) -> torch.Tensor:
-    """生成时间步的正弦嵌入。"""
-    half_dim = dim // 2
-    emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, device=timesteps.device) * -emb)
+def sinusoidal_embedding(timesteps, dim=64):
+    """时间步正弦嵌入。"""
+    half = dim // 2
+    emb = math.log(10000) / (half - 1)
+    emb = torch.exp(torch.arange(half, device=timesteps.device) * -emb)
     emb = timesteps.float().unsqueeze(1) * emb.unsqueeze(0)
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-    if dim % 2 == 1:  # padding when dim is odd
+    if dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
     return emb
 
 
 class FiLMBlock(nn.Module):
-    """简单的 FiLM 残差块，融合时间和标签条件。"""
+    """FiLM 残差块，融合条件向量。"""
 
-    def __init__(self, channels: int, cond_dim: int):
+    def __init__(self, channels, cond_dim):
         super().__init__()
         self.conv1 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
         self.norm1 = nn.BatchNorm1d(channels)
         self.norm2 = nn.BatchNorm1d(channels)
-        self.activation = nn.SiLU()
-        self.cond = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(cond_dim, channels * 2)
-        )
+        self.cond = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, channels * 2))
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, cond):
         scale, shift = self.cond(cond).chunk(2, dim=1)
-        h = self.conv1(self.activation(self.norm1(x)))
+        h = self.conv1(F.silu(self.norm1(x)))
         h = h * scale.unsqueeze(-1) + shift.unsqueeze(-1)
-        h = self.conv2(self.activation(self.norm2(h)))
+        h = self.conv2(F.silu(self.norm2(h)))
         return x + h
 
 
 class ConditionalDenoiser(nn.Module):
-    """简化版 1D 条件去噪网络。"""
+    """简化 1D 条件去噪网络 epsilon_theta。"""
 
-    def __init__(self, in_channels: int, base_channels: int, cond_dim: int):
+    def __init__(self, in_channels, base_channels, cond_dim):
         super().__init__()
         self.input_proj = nn.Conv1d(in_channels, base_channels, kernel_size=3, padding=1)
         self.block1 = FiLMBlock(base_channels, cond_dim)
         self.block2 = FiLMBlock(base_channels, cond_dim)
+        self.block3 = FiLMBlock(base_channels, cond_dim)
         self.output_proj = nn.Conv1d(base_channels, in_channels, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, cond):
         h = self.input_proj(x)
         h = self.block1(h, cond)
         h = self.block2(h, cond)
+        h = self.block3(h, cond)
         return self.output_proj(F.silu(h))
 
 
 class DiffusionGenerator(nn.Module):
-    """用于生成 I/Q 序列的条件扩散模型。"""
+    """KCDM 生成器，支持分类器引导采样。"""
 
     def __init__(
         self,
-        num_classes: int,
-        signal_length: int,
-        in_channels: int = 2,
-        base_channels: int = 64,  # 修改1：降低通道数 (原128) 以减少参数量和显存
-        time_emb_dim: int = 64,
-        timesteps: int = 20,      # 修改2：降低默认时间步 (原100) 以支持反向传播
-        beta_start: float = 1e-4,
-        beta_end: float = 0.02,
+        num_classes,
+        signal_length,
+        in_channels=2,
+        base_channels=128,
+        time_emb_dim=128,
+        timesteps=1000,
+        beta_start=1e-4,
+        beta_end=2e-2,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -81,15 +84,20 @@ class DiffusionGenerator(nn.Module):
         self.signal_length = signal_length
         self.timesteps = timesteps
 
-        self.time_mlp = nn.Sequential(
+        # 条件嵌入 K = MLP_t(t) + MLP_m(M)
+        self.time_embed = nn.Sequential(
             nn.Linear(time_emb_dim, time_emb_dim * 2),
             nn.SiLU(),
             nn.Linear(time_emb_dim * 2, time_emb_dim),
         )
-        self.label_emb = nn.Embedding(num_classes, time_emb_dim)
-        # 注意：这里传入 base_channels
+        self.mod_embed = nn.Sequential(
+            nn.Embedding(num_classes, time_emb_dim),
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, time_emb_dim),
+        )
         self.denoiser = ConditionalDenoiser(in_channels, base_channels, time_emb_dim)
 
+        # 线性 beta 调度
         betas = torch.linspace(beta_start, beta_end, timesteps)
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -97,53 +105,67 @@ class DiffusionGenerator(nn.Module):
         self.register_buffer("alphas", alphas)
         self.register_buffer("alphas_cumprod", alphas_cumprod)
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
-        self.register_buffer("sqrt_recip_alphas", torch.sqrt(1.0 / alphas))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
+        self.register_buffer("sqrt_recip_alphas", torch.sqrt(1.0 / alphas))
+        self.register_buffer("posterior_variance", betas)  # 简化 Eq.(15) 中 beta_t
 
-    def _get_condition(self, t: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        time_emb = sinusoidal_embedding(t, self.time_mlp[0].in_features)
-        time_emb = self.time_mlp(time_emb)
-        label_emb = self.label_emb(labels)
-        return time_emb + label_emb
-
-    def q_sample(self, x_start: torch.Tensor, t: torch.Tensor, noise: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        前向扩散：给定原始样本 x0 与时间步 t，生成带噪声的 xt。
-        """
+    # === Forward diffusion q(s_t | s_0) ===
+    def q_sample(self, x_start, t, noise=None):
         if noise is None:
             noise = torch.randn_like(x_start)
-        sqrt_alphas_cumprod_t = self.sqrt_alphas_cumprod[t].view(-1, 1, 1)
-        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
-        return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+        sqrt_alpha = self.sqrt_alphas_cumprod[t].view(-1, 1, 1)
+        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
+        return sqrt_alpha * x_start + sqrt_one_minus_alpha * noise
 
-    def p_losses(
-        self,
-        x_start: torch.Tensor,
-        t: torch.Tensor,
-        labels: torch.Tensor,
-        noise: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        反向去噪训练目标：预测添加的噪声，并以 MSE 作为损失。
-        """
-        if noise is None:
-            noise = torch.randn_like(x_start)
+    # 条件向量 K
+    def _get_cond(self, t, labels):
+        t_emb = sinusoidal_embedding(t, self.time_embed[0].in_features)
+        t_emb = self.time_embed(t_emb)
+        m_emb = self.mod_embed(labels)
+        return t_emb + m_emb
+
+    # epsilon_theta(st, K)
+    def predict_noise(self, x, t, labels):
+        cond = self._get_cond(t, labels)
+        return self.denoiser(x, cond)
+
+    # 训练损失 L_DM (Eq.16)
+    def training_loss(self, x_start, labels):
+        t = torch.randint(0, self.timesteps, (x_start.size(0),), device=x_start.device, dtype=torch.long)
+        noise = torch.randn_like(x_start)
         x_noisy = self.q_sample(x_start, t, noise)
         noise_pred = self.predict_noise(x_noisy, t, labels)
         return F.mse_loss(noise_pred, noise)
 
-    def training_loss(self, x_start: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """
-        FedDDPM 训练接口：随机采样时间步并计算噪声预测损失。
-        """
-        t = torch.randint(0, self.timesteps, (x_start.size(0),), device=x_start.device, dtype=torch.long)
-        return self.p_losses(x_start, t, labels)
+    def predict_x0(self, x_noisy, t, noise_pred):
+        sqrt_recip_alpha_bar = 1.0 / self.sqrt_alphas_cumprod[t].view(-1, 1, 1)
+        sqrt_recipm1_alpha_bar = torch.sqrt(1.0 / self.alphas_cumprod[t] - 1).view(-1, 1, 1)
+        return sqrt_recip_alpha_bar * x_noisy - sqrt_recipm1_alpha_bar * noise_pred
 
-    def predict_noise(self, x: torch.Tensor, t: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        cond = self._get_condition(t, labels)
-        return self.denoiser(x, cond)
+    # 反向采样 (Eq.15)
+    def p_sample(self, x, t, labels, classifier=None, classifier_scale=0.0):
+        noise_pred = self.predict_noise(x, t, labels)
+        if classifier is not None and classifier_scale > 0:
+            x_in = x.detach().requires_grad_(True)
+            logits = classifier(x_in)
+            logp = F.log_softmax(logits, dim=1)
+            selected = logp[torch.arange(x.size(0), device=x.device), labels].sum()
+            grad = torch.autograd.grad(selected, x_in)[0]
+            noise_pred = noise_pred - classifier_scale * grad.detach()
 
-    def sample(self, batch_size: int, labels: Optional[torch.Tensor] = None, device: Optional[str] = None) -> torch.Tensor:
+        beta_t = self.betas[t].view(-1, 1, 1)
+        alpha_t = self.alphas[t].view(-1, 1, 1)
+        alpha_bar_t = self.alphas_cumprod[t].view(-1, 1, 1)
+
+        x_prev_mean = (1.0 / torch.sqrt(alpha_t)) * (
+            x - (1 - alpha_t) / torch.sqrt(1 - alpha_bar_t) * noise_pred
+        )
+        if (t == 0).all():
+            return x_prev_mean
+        noise = torch.randn_like(x)
+        return x_prev_mean + torch.sqrt(beta_t) * noise
+
+    def sample(self, batch_size, labels=None, device=None, classifier=None, classifier_scale=0.0):
         if device is None:
             device = self.betas.device
         if labels is None:
@@ -152,12 +174,5 @@ class DiffusionGenerator(nn.Module):
         x = torch.randn(batch_size, self.in_channels, self.signal_length, device=device)
         for step in reversed(range(self.timesteps)):
             t = torch.full((batch_size,), step, device=device, dtype=torch.long)
-            noise_pred = self.predict_noise(x, t, labels)
-            beta_t = self.betas[step]
-            sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[step]
-            x = self.sqrt_recip_alphas[step] * (x - beta_t / sqrt_one_minus_alpha * noise_pred)
-            if step > 0:
-                noise = torch.randn_like(x)
-                sigma = torch.sqrt(beta_t)
-                x = x + sigma * noise
+            x = self.p_sample(x, t, labels, classifier=classifier, classifier_scale=classifier_scale)
         return x
