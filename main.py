@@ -15,18 +15,21 @@ from dataset.data_loader import get_dataloaders
 # 导入模型
 from FLAlgorithms.trainmodel.models import get_model
 from FLAlgorithms.trainmodel.generator import Generator
+from FLAlgorithms.trainmodel.diffusion import DiffusionAligner
 
 # 导入客户端
 from FLAlgorithms.users.useravg import UserAVG
 from FLAlgorithms.users.userFedProx import UserFedProx
 from FLAlgorithms.users.userpFedGen import UserFedGen
 from FLAlgorithms.users.userFedDiff import UserFedDiff
+from FLAlgorithms.users.userFDAM import UserFDAM
 
 # 导入服务器
 from FLAlgorithms.servers.serveravg import ServerAVG
 from FLAlgorithms.servers.serverFedProx import ServerFedProx
 from FLAlgorithms.servers.serverpFedGen import ServerFedGen
 from FLAlgorithms.servers.serverfeddiff import ServerFedDiff
+from FLAlgorithms.servers.serverFDAM import ServerFDAM
 
 # 导入工具函数
 from utils.model_config import get_dataset_config
@@ -47,8 +50,8 @@ def parse_args():
                        help='预处理数据目录')
     
     # 算法参数
-    parser.add_argument('--algorithm', type=str, default='FedAvg',
-                       choices=['FedAvg', 'FedProx', 'FedGen', 'FedDiff'],
+    parser.add_argument('--algorithm', type=str, default='FDAM',
+                       choices=['FedAvg', 'FedProx', 'FedGen', 'FedDiff', 'FDAM'],
                        help='联邦学习算法')
     
     # 模型参数
@@ -59,9 +62,9 @@ def parse_args():
     # 联邦学习参数
     parser.add_argument('--num_clients', type=int, default=10,
                        help='客户端数量')
-    parser.add_argument('--num_rounds', type=int, default=100,
+    parser.add_argument('--num_rounds', type=int, default=40,
                        help='训练轮次')
-    parser.add_argument('--local_epochs', type=int, default=2,
+    parser.add_argument('--local_epochs', type=int, default=10,
                        help='本地训练轮数')
     
     # 训练参数
@@ -83,7 +86,7 @@ def parse_args():
     parser.add_argument('--non_iid_type', type=str, default='class',
                        choices=['iid', 'class', 'snr'],
                        help='数据划分类型')
-    parser.add_argument('--alpha', type=float, default=0.1,
+    parser.add_argument('--alpha', type=float, default=0.5,
                        help='Dirichlet 参数（用于 class Non-IID）')
     
     # FedProx 参数
@@ -103,8 +106,22 @@ def parse_args():
                        help='每轮扩散蒸馏步数')
     parser.add_argument('--distill_lr', type=float, default=0.001,
                        help='蒸馏阶段学习率')
-    parser.add_argument('--diffusion_steps', type=int, default=50,
-                       help='扩散时间步数')
+    # parser.add_argument('--diffusion_steps', type=int, default=50,
+    #                    help='扩散时间步数')
+
+    # FDAM 参数
+    parser.add_argument('--diffusion_steps', type=int, default=10,
+                       help='FDAM 扩散步数（用于控制对齐难度的超参，当前实现为单步去噪）')
+    parser.add_argument('--align_hidden', type=int, default=256,
+                       help='FDAM 对齐模块隐藏维度')
+    parser.add_argument('--lambda_diff', type=float, default=0.5,
+                       help='FDAM 噪声预测损失权重')
+    parser.add_argument('--lambda_align', type=float, default=0.5,
+                       help='FDAM 原型对齐损失权重')
+    parser.add_argument('--align_beta', type=float, default=0.5,
+                       help='FDAM 聚合时基于分布偏移的惩罚系数')
+    parser.add_argument('--align_noise_std', type=float, default=0.1,
+                       help='FDAM 特征加噪标准差')
     # 输出参数
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='输出目录')
@@ -120,6 +137,7 @@ def parse_args():
                        help='随机种子')
     
     return parser.parse_args()
+
 
 
 def set_seed(seed):
@@ -220,6 +238,32 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
             )
             users.append(user)
 
+    elif algorithm == 'FDAM':
+        with torch.no_grad():
+            dummy = torch.zeros(1, 2, model.signal_length)
+            feat_dim = model.extract_features(dummy).shape[-1]
+        for i in range(num_clients):
+            aligner = DiffusionAligner(
+                feature_dim=feat_dim,
+                hidden_dim=args.align_hidden,
+                diffusion_steps=args.diffusion_steps
+            )
+            user = UserFDAM(
+                user_id=i,
+                model=get_model(args.model, model.num_classes, model.signal_length),
+                aligner=aligner,
+                train_loader=train_loaders[i],
+                learning_rate=args.learning_rate,
+                device=args.device,
+                optimizer_type=args.optimizer,
+                momentum=args.momentum,
+                weight_decay=args.weight_decay,
+                lambda_diff=args.lambda_diff,
+                lambda_align=args.lambda_align,
+                mu=args.mu,
+                noise_std=args.align_noise_std
+            )
+            users.append(user)
     return users
 
 
@@ -280,6 +324,26 @@ def create_server(algorithm, model, users, args):
             diffusion_steps=args.diffusion_steps,
         )
 
+    elif algorithm == 'FDAM':
+        with torch.no_grad():
+            dummy = torch.zeros(1, 2, model.signal_length)
+            feat_dim = model.extract_features(dummy).shape[-1]
+        aligner = DiffusionAligner(
+            feature_dim=feat_dim,
+            hidden_dim=args.align_hidden,
+            diffusion_steps=args.diffusion_steps
+        )
+        server = ServerFDAM(
+            model=model,
+            aligner=aligner,
+            users=users,
+            num_rounds=args.num_rounds,
+            num_classes=model.num_classes,
+            feature_dim=feat_dim,
+            align_beta=args.align_beta,
+            device=args.device
+        )
+        
     return server
 
 
@@ -311,6 +375,8 @@ def main():
     logger.info("=" * 80)
     logger.info(f"数据集: {args.dataset}")
     logger.info(f"SNR: {args.data_snr}")
+    logger.info(f"划分类型: {args.non_iid_type}")
+    logger.info(f"狄利克雷参数: {args.alpha}")
     logger.info(f"算法: {args.algorithm}")
     logger.info(f"模型: {args.model}")
     logger.info(f"客户端数量: {args.num_clients}")
@@ -409,7 +475,7 @@ def main():
     
     # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
     params_str = f"{args.num_clients}_{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
-    final_dirname = f"{args.dataset}_{args.data_snr}_{args.algorithm}_{args.model}_{final_acc:.2f}pct_{params_str}_{timestamp}"
+    final_dirname = f"{args.dataset}_{args.data_snr}_{args.non_iid_type}_{args.alpha}_{args.algorithm}_{args.model}_{final_acc:.2f}_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
     
     # 重命名临时目录为最终目录

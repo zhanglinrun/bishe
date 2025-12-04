@@ -45,35 +45,36 @@ class CNN1D_AMR(nn.Module):
         self.dropout = nn.Dropout(0.5)
         self.fc2 = nn.Linear(256, num_classes)
     
-    def forward(self, x):
-        # 卷积块 1
+    def extract_features(self, x):
+        """提取分类前的特征表示"""
         x = self.conv1(x)
         x = self.bn1(x)
         x = F.relu(x)
         x = self.pool1(x)
         
-        # 卷积块 2
         x = self.conv2(x)
         x = self.bn2(x)
         x = F.relu(x)
         x = self.pool2(x)
         
-        # 卷积块 3
         x = self.conv3(x)
         x = self.bn3(x)
         x = F.relu(x)
         x = self.pool3(x)
         
-        # 展平
         x = x.view(x.size(0), -1)
-        
-        # 全连接层
         x = self.fc1(x)
         x = F.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        
-        return x
+        return x  # [B, 256]
+
+    def classify_from_features(self, features):
+        """基于特征向量得到分类 logits"""
+        x = self.dropout(features)
+        return self.fc2(x)
+
+    def forward(self, x):
+        feats = self.extract_features(x)
+        return self.classify_from_features(feats)
 
 
 class ResidualBlock1D(nn.Module):
@@ -143,26 +144,27 @@ class ResNet1D_AMR(nn.Module):
             layers.append(ResidualBlock1D(out_channels, out_channels, 1))
         return nn.Sequential(*layers)
     
-    def forward(self, x):
-        # 初始卷积
+    def extract_features(self, x):
+        """返回分类前的全局特征"""
         x = self.conv1(x)
         x = self.bn1(x)
         x = F.relu(x)
         x = self.maxpool(x)
         
-        # 残差块
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         
-        # 全局平均池化
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
-        
-        # 全连接层
-        x = self.fc(x)
-        
-        return x
+        return x  # [B, 256]
+
+    def classify_from_features(self, features):
+        return self.fc(features)
+
+    def forward(self, x):
+        feats = self.extract_features(x)
+        return self.classify_from_features(feats)
 
 
 class MCLDNN_AMR(nn.Module):
@@ -206,43 +208,33 @@ class MCLDNN_AMR(nn.Module):
         self.dropout = nn.Dropout(0.5)
         self.fc2 = nn.Linear(128, num_classes)
     
-    def forward(self, x):
-        # 输入: [B, 2, L]
-        
-        # CNN特征提取
-        # Conv1
-        x = self.conv1(x)  # [B, 64, L]
+    def extract_features(self, x):
+        """返回 LSTM 之后的融合特征"""
+        x = self.conv1(x)
         x = self.bn1(x)
         x = F.relu(x)
         
-        # Conv2
-        x = self.conv2(x)  # [B, 128, L]
+        x = self.conv2(x)
         x = self.bn2(x)
         x = F.relu(x)
         
-        # 转换维度以适配LSTM: [B, C, L] -> [B, L, C]
         x = x.permute(0, 2, 1)  # [B, L, 128]
+        _, (h_n, _) = self.lstm(x)
         
-        # LSTM时序处理
-        # lstm_out: [B, L, 256] (256 = hidden_size * 2)
-        lstm_out, (h_n, c_n) = self.lstm(x)
-        
-        # 使用最后一个时间步的输出
-        # h_n shape: [num_layers * num_directions, B, hidden_size]
-        # 我们需要最后一层的两个方向
-        # 前向最后一层: h_n[-2, :, :]
-        # 后向最后一层: h_n[-1, :, :]
         forward_hidden = h_n[-2, :, :]  # [B, 128]
         backward_hidden = h_n[-1, :, :]  # [B, 128]
         hidden = torch.cat([forward_hidden, backward_hidden], dim=1)  # [B, 256]
-        
-        # 全连接分类
-        x = self.fc1(hidden)  # [B, 128]
-        x = F.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)  # [B, num_classes]
-        
-        return x
+        hidden = self.fc1(hidden)
+        hidden = F.relu(hidden)
+        return hidden  # [B, 128]
+
+    def classify_from_features(self, features):
+        x = self.dropout(features)
+        return self.fc2(x)
+
+    def forward(self, x):
+        feats = self.extract_features(x)
+        return self.classify_from_features(feats)
 
 
 def get_model(model_name, num_classes, signal_length):

@@ -86,7 +86,7 @@ class ServerFedDiff(ServerAVG):
         pseudo_data = self.generator.sample(self.pseudo_batch_size, labels, device=self.device)
 
         teacher_probs = self._collect_teacher_probs(pseudo_data)
-        student_logits = self.model(pseudo_data.detach())
+        student_logits = self.model(pseudo_data.detach())c
         kd_loss = self.kldiv(torch.log_softmax(student_logits, dim=1), teacher_probs)
 
         self.model_optimizer.zero_grad()
@@ -98,6 +98,7 @@ class ServerFedDiff(ServerAVG):
     def train(self, test_loader, local_epochs, logger=None):  # type: ignore[override]
         for round_num in range(1, self.num_rounds + 1):
             self.send_parameters()
+            self.send_generator_parameters()
 
             local_losses = []
             for user in self.users:
