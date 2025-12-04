@@ -188,7 +188,7 @@ def split_data_iid(X, y, snr, num_clients):
     
     client_data = []
     for client_idx in split_indices:
-        client_data.append((X[client_idx], y[client_idx]))
+        client_data.append((X[client_idx], y[client_idx], snr[client_idx]))
     
     return client_data
 
@@ -232,52 +232,46 @@ def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
     for client_id in range(num_clients):
         indices = np.array(client_data[client_id])
         np.random.shuffle(indices)
-        result.append((X[indices], y[indices]))
-
-    # 覆盖检查与回退
-    empty_clients = [idx for idx, pair in enumerate(result) if len(pair[1]) == 0]
-    if empty_clients:
-        print(f"警告: Dirichlet 划分产生空客户端 {empty_clients}，降级为 IID 划分")
-        return split_data_iid(X, y, snr, num_clients)
-    class_coverage = [np.unique(pair[1]).size for pair in result]
-    print(f"每个客户端覆盖的类别数: {class_coverage}")
+        result.append((X[indices], y[indices], snr[indices]))
     
     return result
 
 
-def split_data_non_iid_snr(X, y, snr, num_clients):
+def split_data_non_iid_snr(X, y, snr, num_clients, alpha=0.5):
     """
-    按 SNR 范围 Non-IID 划分：不同客户端获得不同 SNR 范围的数据
+    按 SNR Non-IID 划分：使用 Dirichlet 分布
     
     Args:
         X: 数据
         y: 标签
         snr: SNR 值
         num_clients: 客户端数量
+        alpha: Dirichlet 分布参数（越小越不均衡）
         
     Returns:
-        client_data: 列表，每个元素是 (X_client, y_client)
+        client_data: 列表，每个元素是 (X_client, y_client, snr_client)
     """
-    # 获取 SNR 的范围
     unique_snrs = np.sort(np.unique(snr))
+    client_data = [[] for _ in range(num_clients)]
     
-    # 将 SNR 划分为 num_clients 段
-    snr_splits = np.array_split(unique_snrs, num_clients)
+    for snr_val in unique_snrs:
+        snr_indices = np.where(snr == snr_val)[0]
+        np.random.shuffle(snr_indices)
+        
+        proportions = np.random.dirichlet(alpha * np.ones(num_clients))
+        proportions = (np.cumsum(proportions) * len(snr_indices)).astype(int)[:-1]
+        split_indices = np.split(snr_indices, proportions)
+        
+        for client_id, idx in enumerate(split_indices):
+            client_data[client_id].extend(idx.tolist())
     
-    client_data = []
-    for snr_range in snr_splits:
-        # 找到该 SNR 范围内的所有样本
-        mask = np.isin(snr, snr_range)
-        indices = np.where(mask)[0]
-        client_data.append((X[indices], y[indices]))
-
-    # 若存在空客户端（例如客户端数量多于 SNR 段），回退为 IID 划分
-    empty_clients = [idx for idx, pair in enumerate(client_data) if len(pair[1]) == 0]
-    if empty_clients:
-        print(f"警告: SNR 划分产生空客户端 {empty_clients}，降级为 IID 划分")
-        return split_data_iid(X, y, snr, num_clients)
+    result = []
+    for client_id in range(num_clients):
+        indices = np.array(client_data[client_id])
+        np.random.shuffle(indices)
+        result.append((X[indices], y[indices], snr[indices]))
     
-    return client_data
+    return result
 
 
 def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
@@ -292,69 +286,23 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     Returns:
         X_train: 训练数据
         y_train: 训练标签
-        X_val: 验证数据
-        y_val: 验证标签
         X_test: 测试数据
         y_test: 测试标签
-        snr_train/val/test: 对应 SNR
         num_classes: 类别数
     """
     # 构造文件路径
     train_file = os.path.join(data_dir, dataset_name, 'train', f'{data_snr}.pkl')
-    val_file = os.path.join(data_dir, dataset_name, 'val', f'{data_snr}.pkl')
     test_file = os.path.join(data_dir, dataset_name, 'test', f'{data_snr}.pkl')
     
-    # 加载训练集
     if not os.path.exists(train_file):
         raise FileNotFoundError(f"训练集文件不存在: {train_file}")
     with open(train_file, 'rb') as f:
-        loaded = pickle.load(f)
-        if len(loaded) == 3:
-            X_train, y_train, snr_train = loaded
-        else:
-            X_train, y_train = loaded
-            try:
-                snr_val = float(str(data_snr).replace('dB', ''))
-            except ValueError:
-                snr_val = 0.0
-            snr_train = np.full(len(X_train), snr_val)
+        X_train, y_train, snr_train = pickle.load(f)
     
-    # 加载验证集（若不存在则从训练集切分 8:2 临时生成，保持向后兼容）
-    if os.path.exists(val_file):
-        with open(val_file, 'rb') as f:
-            loaded = pickle.load(f)
-            if len(loaded) == 3:
-                X_val, y_val, snr_val_arr = loaded
-            else:
-                X_val, y_val = loaded
-                try:
-                    snr_val_num = float(str(data_snr).replace('dB', ''))
-                except ValueError:
-                    snr_val_num = 0.0
-                snr_val_arr = np.full(len(X_val), snr_val_num)
-    else:
-        print(f"警告: 验证集文件不存在: {val_file}，将从训练集中临时划分 80/20")
-        rng = np.random.default_rng(seed=42)
-        indices = rng.permutation(len(y_train))
-        split = int(len(indices) * 0.8)
-        train_idx, val_idx = indices[:split], indices[split:]
-        X_val, y_val, snr_val_arr = X_train[val_idx], y_train[val_idx], snr_train[val_idx]
-        X_train, y_train, snr_train = X_train[train_idx], y_train[train_idx], snr_train[train_idx]
-    
-    # 加载测试集
     if not os.path.exists(test_file):
         raise FileNotFoundError(f"测试集文件不存在: {test_file}")
     with open(test_file, 'rb') as f:
-        loaded = pickle.load(f)
-        if len(loaded) == 3:
-            X_test, y_test, snr_test = loaded
-        else:
-            X_test, y_test = loaded
-            try:
-                snr_val = float(str(data_snr).replace('dB', ''))
-            except ValueError:
-                snr_val = 0.0
-            snr_test = np.full(len(X_test), snr_val)
+        X_test, y_test, snr_test = pickle.load(f)
     
     # 获取类别数
     config = get_dataset_config(dataset_name)
@@ -362,12 +310,11 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     
     print(f"从预处理文件加载数据:")
     print(f"  训练集: {train_file}")
-    print(f"  验证集: {val_file if os.path.exists(val_file) else '临时划分'}")
     print(f"  测试集: {test_file}")
-    print(f"  训练样本数: {len(X_train)}, 验证样本数: {len(X_val)}, 测试样本数: {len(X_test)}")
+    print(f"  训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
     print(f"  数据形状: {X_train.shape}")
     
-    return X_train, y_train, X_val, y_val, X_test, y_test, snr_train, snr_val_arr, snr_test, num_classes
+    return X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes
 
 
 def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid', 
@@ -386,22 +333,12 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
         
     Returns:
         train_loaders: 列表，每个元素是一个客户端的 DataLoader
-        val_loader: 全局验证集 DataLoader
         test_loader: 全局测试集 DataLoader
         num_classes: 类别数
     """
-    # 加载预处理的数据
-    (X_train, y_train,
-     X_val, y_val,
-     X_test, y_test,
-     snr_train, snr_val, snr_test,
-     num_classes) = load_preprocessed_data(dataset_name, data_snr, data_dir)
-    
-    # 如果旧格式缺少 SNR（snr_train 为常数），在 100dB/highsnr 情况下给出提示
-    if non_iid_type == 'snr':
-        unique_snrs = np.unique(snr_train)
-        if len(unique_snrs) <= 1 and data_snr in ['100dB', 'highsnr']:
-            print("警告: 预处理文件缺少样本级 SNR，snr 划分将退化为近似均匀切分。请重新运行 dataset/datasplit.py 以写入 SNR。")
+    X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes = load_preprocessed_data(
+        dataset_name, data_snr, data_dir
+    )
     
     # 划分客户端数据
     if non_iid_type == 'iid':
@@ -409,20 +346,18 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
     elif non_iid_type == 'class':
         client_data = split_data_non_iid_class(X_train, y_train, snr_train, num_clients, alpha)
     elif non_iid_type == 'snr':
-        client_data = split_data_non_iid_snr(X_train, y_train, snr_train, num_clients)
+        client_data = split_data_non_iid_snr(X_train, y_train, snr_train, num_clients, alpha)
     else:
         raise ValueError(f"未知的 Non-IID 类型: {non_iid_type}")
     
     # 创建客户端 DataLoader
     train_loaders = []
-    for X_client, y_client in client_data:
+    for X_client, y_client, snr_client in client_data:
         dataset = SignalDataset(X_client, y_client)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
         train_loaders.append(loader)
     
-    # 创建全局验证/测试集 DataLoader
-    val_dataset = SignalDataset(X_val, y_val)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    # 创建全局测试集 DataLoader
     test_dataset = SignalDataset(X_test, y_test)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
@@ -431,5 +366,5 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
     print(f"客户端数量: {num_clients}, 划分类型: {non_iid_type}")
     print(f"每个客户端平均样本数: {len(y_train) // num_clients}")
     
-    return train_loaders, val_loader, test_loader, num_classes
+    return train_loaders, test_loader, num_classes
 

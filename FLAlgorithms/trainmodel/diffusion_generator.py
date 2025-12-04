@@ -96,6 +96,7 @@ class DiffusionGenerator(nn.Module):
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", alphas)
         self.register_buffer("alphas_cumprod", alphas_cumprod)
+        self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_recip_alphas", torch.sqrt(1.0 / alphas))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
 
@@ -104,6 +105,39 @@ class DiffusionGenerator(nn.Module):
         time_emb = self.time_mlp(time_emb)
         label_emb = self.label_emb(labels)
         return time_emb + label_emb
+
+    def q_sample(self, x_start: torch.Tensor, t: torch.Tensor, noise: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        前向扩散：给定原始样本 x0 与时间步 t，生成带噪声的 xt。
+        """
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        sqrt_alphas_cumprod_t = self.sqrt_alphas_cumprod[t].view(-1, 1, 1)
+        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
+        return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+
+    def p_losses(
+        self,
+        x_start: torch.Tensor,
+        t: torch.Tensor,
+        labels: torch.Tensor,
+        noise: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        反向去噪训练目标：预测添加的噪声，并以 MSE 作为损失。
+        """
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        x_noisy = self.q_sample(x_start, t, noise)
+        noise_pred = self.predict_noise(x_noisy, t, labels)
+        return F.mse_loss(noise_pred, noise)
+
+    def training_loss(self, x_start: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        FedDDPM 训练接口：随机采样时间步并计算噪声预测损失。
+        """
+        t = torch.randint(0, self.timesteps, (x_start.size(0),), device=x_start.device, dtype=torch.long)
+        return self.p_losses(x_start, t, labels)
 
     def predict_noise(self, x: torch.Tensor, t: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         cond = self._get_condition(t, labels)

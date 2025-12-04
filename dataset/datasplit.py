@@ -7,45 +7,10 @@
 import os
 import pickle
 import numpy as np
+import h5py
 import argparse
 import gc
-
-# 尝试导入 h5py（仅在处理 RML2018a/HisarMod 时需要）
-try:
-    import h5py  # type: ignore
-except ModuleNotFoundError:
-    h5py = None
-
-# 尝试导入 sklearn 的 train_test_split，不存在时提供简易分层实现
-try:
-    from sklearn.model_selection import train_test_split  # type: ignore
-except ModuleNotFoundError:
-    def train_test_split(X, y, test_size=0.3, stratify=None, random_state=None):
-        """
-        简易版 train_test_split，当 sklearn 不可用时使用。
-        仅支持按比例划分，可选分层。
-        """
-        rng = np.random.default_rng(seed=random_state)
-        indices = np.arange(len(y))
-
-        if stratify is not None:
-            train_idx = []
-            test_idx = []
-            for cls in np.unique(stratify):
-                cls_indices = indices[stratify == cls]
-                rng.shuffle(cls_indices)
-                split = int(len(cls_indices) * (1 - test_size))
-                train_idx.append(cls_indices[:split])
-                test_idx.append(cls_indices[split:])
-            train_idx = np.concatenate(train_idx)
-            test_idx = np.concatenate(test_idx)
-        else:
-            rng.shuffle(indices)
-            split = int(len(indices) * (1 - test_size))
-            train_idx = indices[:split]
-            test_idx = indices[split:]
-
-        return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
+from sklearn.model_selection import train_test_split
 
 
 def load_RML2016_10a(input_dir):
@@ -136,9 +101,6 @@ def load_RML2018a(input_dir):
         mods: 调制类型列表
     """
     file_path = os.path.join(input_dir, 'RML2018a', 'GOLD_XYZ_OSC.0001_1024.hdf5')
-
-    if h5py is None:
-        raise ImportError("缺少 h5py，请安装后处理 RML2018a 数据集")
     
     print(f"加载 {file_path}...")
     with h5py.File(file_path, 'r') as f:
@@ -179,9 +141,6 @@ def load_HisarMod(input_dir):
     """
     train_path = os.path.join(input_dir, 'HisarMod', 'HisarMod2019train.h5')
     test_path = os.path.join(input_dir, 'HisarMod', 'HisarMod2019test.h5')
-
-    if h5py is None:
-        raise ImportError("缺少 h5py，请安装后处理 HisarMod 数据集")
     
     print(f"加载 {train_path} 和 {test_path}...")
     
@@ -220,9 +179,9 @@ def _load_hisar_file(file_path):
     return X, y.astype(np.int64), snr
 
 
-def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, random_state=42):
+def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size, random_state):
     """
-    按 SNR 分割数据集并立即保存，比例 6:2:2 (train:val:test)
+    按SNR分割数据集并立即保存
     
     Args:
         X: 数据
@@ -230,10 +189,11 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, random_state=42):
         snr: SNR值
         output_dir: 输出目录
         dataset_name: 数据集名称
+        test_size: 测试集比例
         random_state: 随机种子
         
     Returns:
-        snr_info: 字典，键为SNR值，值为 (train_shape, val_shape, test_shape)
+        snr_info: 字典，键为SNR值，值为 (train_shape, test_shape)
     """
     unique_snrs = np.sort(np.unique(snr))
     print(f"\nSNR值范围: {unique_snrs}")
@@ -241,10 +201,8 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, random_state=42):
     
     # 创建输出目录
     train_dir = os.path.join(output_dir, dataset_name, 'train')
-    val_dir = os.path.join(output_dir, dataset_name, 'val')
     test_dir = os.path.join(output_dir, dataset_name, 'test')
     os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(val_dir, exist_ok=True)
     os.makedirs(test_dir, exist_ok=True)
     
     print(f"\n保存数据到 {os.path.join(output_dir, dataset_name)}")
@@ -265,44 +223,34 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, random_state=42):
         unique, counts = np.unique(y_snr, return_counts=True)
         print(f"  类别分布: {dict(zip(unique, counts))}")
         
-        # 第一次划分：train 与 temp (val+test)
-        train_X, temp_X, train_y, temp_y = train_test_split(
-            X_snr, y_snr,
-            test_size=0.4,  # 留出 40% 做 val+test
+        snr_snr = np.full(len(y_snr), snr_val)
+        
+        # 分层抽样划分
+        train_X, test_X, train_y, test_y, train_snr, test_snr = train_test_split(
+            X_snr, y_snr, snr_snr,
+            test_size=test_size,
             stratify=y_snr,
             random_state=random_state
         )
         
-        # 第二次划分：val 与 test（各 20%）
-        val_X, test_X, val_y, test_y = train_test_split(
-            temp_X, temp_y,
-            test_size=0.5,
-            stratify=temp_y,
-            random_state=random_state
-        )
+        print(f"  训练集: {len(train_X)}, 测试集: {len(test_X)}")
         
-        print(f"  训练集: {len(train_X)}, 验证集: {len(val_X)}, 测试集: {len(test_X)}")
-        
-        # 立即保存，包含原始 SNR，后续 Non-IID SNR 划分直接使用真实值
+        # 立即保存，减少内存占用
         train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
         with open(train_file, 'wb') as f:
-            pickle.dump((train_X, train_y, np.full(len(train_X), snr_val)), f, protocol=4)
-        
-        val_file = os.path.join(val_dir, f"{int(snr_val)}dB.pkl")
-        with open(val_file, 'wb') as f:
-            pickle.dump((val_X, val_y, np.full(len(val_X), snr_val)), f, protocol=4)
+            pickle.dump((train_X, train_y, train_snr), f, protocol=4)
         
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         with open(test_file, 'wb') as f:
-            pickle.dump((test_X, test_y, np.full(len(test_X), snr_val)), f, protocol=4)
+            pickle.dump((test_X, test_y, test_snr), f, protocol=4)
         
         print(f"  已保存 {int(snr_val)}dB")
         
         # 保存形状信息用于后续合并
-        snr_info[snr_val] = (train_X.shape, val_X.shape, test_X.shape)
+        snr_info[snr_val] = (train_X.shape, test_X.shape)
         
         # 释放内存
-        del X_snr, y_snr, train_X, train_y, val_X, val_y, test_X, test_y, temp_X, temp_y
+        del X_snr, y_snr, snr_snr, train_X, test_X, train_y, test_y, train_snr, test_snr
         gc.collect()
     
     return snr_info
@@ -330,34 +278,22 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     all_test_X, all_test_y, all_test_snr = [], [], []
     
     for snr_val in sorted(snr_info.keys()):
-        # 从文件加载
         train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         
         with open(train_file, 'rb') as f:
-            loaded = pickle.load(f)
-            if len(loaded) == 2:
-                train_X, train_y = loaded
-                train_snr = np.full(len(train_X), snr_val)
-            else:
-                train_X, train_y, train_snr = loaded
+            train_X, train_y, train_snr = pickle.load(f)
             all_train_X.append(train_X)
             all_train_y.append(train_y)
             all_train_snr.append(train_snr)
         
         with open(test_file, 'rb') as f:
-            loaded = pickle.load(f)
-            if len(loaded) == 2:
-                test_X, test_y = loaded
-                test_snr = np.full(len(test_X), snr_val)
-            else:
-                test_X, test_y, test_snr = loaded
+            test_X, test_y, test_snr = pickle.load(f)
             all_test_X.append(test_X)
             all_test_y.append(test_y)
             all_test_snr.append(test_snr)
         
-        # 立即释放
-        del train_X, train_y, test_X, test_y
+        del train_X, train_y, train_snr, test_X, test_y, test_snr
         gc.collect()
     
     all_train_X = np.vstack(all_train_X)
@@ -367,7 +303,6 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     all_test_y = np.concatenate(all_test_y)
     all_test_snr = np.concatenate(all_test_snr)
     
-    # 保存 100dB
     with open(os.path.join(train_dir, '100dB.pkl'), 'wb') as f:
         pickle.dump((all_train_X, all_train_y, all_train_snr), f, protocol=4)
     with open(os.path.join(test_dir, '100dB.pkl'), 'wb') as f:
@@ -375,8 +310,7 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     
     print(f"    训练集: {all_train_X.shape}, 测试集: {all_test_X.shape}")
     
-    # 释放内存
-    del all_train_X, all_train_y, all_test_X, all_test_y
+    del all_train_X, all_train_y, all_train_snr, all_test_X, all_test_y, all_test_snr
     gc.collect()
     
     # 2. 高SNR合并 (highsnr: SNR > 0)
@@ -386,34 +320,22 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
     
     for snr_val in sorted(snr_info.keys()):
         if snr_val > 0:
-            # 从文件加载
             train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
             test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
             
             with open(train_file, 'rb') as f:
-                loaded = pickle.load(f)
-                if len(loaded) == 2:
-                    train_X, train_y = loaded
-                    train_snr = np.full(len(train_X), snr_val)
-                else:
-                    train_X, train_y, train_snr = loaded
+                train_X, train_y, train_snr = pickle.load(f)
                 high_train_X.append(train_X)
                 high_train_y.append(train_y)
                 high_train_snr.append(train_snr)
             
             with open(test_file, 'rb') as f:
-                loaded = pickle.load(f)
-                if len(loaded) == 2:
-                    test_X, test_y = loaded
-                    test_snr = np.full(len(test_X), snr_val)
-                else:
-                    test_X, test_y, test_snr = loaded
+                test_X, test_y, test_snr = pickle.load(f)
                 high_test_X.append(test_X)
                 high_test_y.append(test_y)
                 high_test_snr.append(test_snr)
             
-            # 立即释放
-            del train_X, train_y, test_X, test_y
+            del train_X, train_y, train_snr, test_X, test_y, test_snr
             gc.collect()
     
     if high_train_X:
@@ -424,7 +346,6 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
         high_test_y = np.concatenate(high_test_y)
         high_test_snr = np.concatenate(high_test_snr)
         
-        # 保存 highsnr
         with open(os.path.join(train_dir, 'highsnr.pkl'), 'wb') as f:
             pickle.dump((high_train_X, high_train_y, high_train_snr), f, protocol=4)
         with open(os.path.join(test_dir, 'highsnr.pkl'), 'wb') as f:
@@ -432,22 +353,13 @@ def generate_combined_datasets(snr_info, output_dir, dataset_name):
         
         print(f"    训练集: {high_train_X.shape}, 测试集: {high_test_X.shape}")
         
-        # 释放内存
-        del high_train_X, high_train_y, high_test_X, high_test_y
+        del high_train_X, high_train_y, high_train_snr, high_test_X, high_test_y, high_test_snr
         gc.collect()
     else:
         print("    没有SNR > 0的数据")
 
 
-def process_dataset(dataset_name, input_dir, output_dir):
-    """
-    处理单个数据集
-    
-    Args:
-        dataset_name: 数据集名称
-        input_dir: 输入目录
-        output_dir: 输出目录
-    """
+def process_dataset(dataset_name, input_dir, output_dir, test_size, random_state):
     print("=" * 80)
     print(f"处理数据集: {dataset_name}")
     print("=" * 80)
@@ -465,7 +377,7 @@ def process_dataset(dataset_name, input_dir, output_dir):
         raise ValueError(f"未知数据集: {dataset_name}")
     
     # 按SNR分割并立即保存
-    snr_info = split_and_save_by_snr(X, y, snr, output_dir, dataset_name)
+    snr_info = split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size, random_state)
     
     # 释放原始数据
     del X, y, snr, mods
@@ -487,6 +399,10 @@ def main():
                        help='原始数据集目录（默认：dataset）')
     parser.add_argument('--output_dir', type=str, default='data_processed',
                        help='输出目录（默认：data_processed）')
+    parser.add_argument('--test_size', type=float, default=0.3,
+                       help='测试集比例（默认：0.3）')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='随机种子（默认：42）')
     
     args = parser.parse_args()
     
@@ -495,6 +411,8 @@ def main():
     print("=" * 80)
     print(f"输入目录: {args.input_dir}")
     print(f"输出目录: {args.output_dir}")
+    print(f"测试集比例: {args.test_size}")
+    print(f"随机种子: {args.seed}")
     print("=" * 80)
     
     # 处理数据集
@@ -502,12 +420,12 @@ def main():
         datasets = ['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod']
         for dataset in datasets:
             try:
-                process_dataset(dataset, args.input_dir, args.output_dir)
+                process_dataset(dataset, args.input_dir, args.output_dir, args.test_size, args.seed)
             except Exception as e:
                 print(f"\n[错误] 处理 {dataset} 时出错: {e}")
                 print("跳过此数据集，继续处理下一个...\n")
     else:
-        process_dataset(args.dataset, args.input_dir, args.output_dir)
+        process_dataset(args.dataset, args.input_dir, args.output_dir, args.test_size, args.seed)
     
     print("\n" + "=" * 80)
     print("所有数据集处理完成！")

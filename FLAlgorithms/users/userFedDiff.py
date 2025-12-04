@@ -1,6 +1,7 @@
 import torch
 import copy
 from FLAlgorithms.users.userbase import User
+from FLAlgorithms.trainmodel.diffusion_generator import DiffusionGenerator
 
 class UserFedDiff(User):
     """
@@ -14,21 +15,37 @@ class UserFedDiff(User):
     def __init__(self, user_id, model, train_loader, learning_rate, device='cpu',
                  optimizer_type='adam', momentum=0.9, weight_decay=1e-4,
                  diffusion_steps=50, gen_learning_rate=1e-3):
-        # 注意：diffusion_steps 和 gen_learning_rate 在客户端不再使用，保留参数是为了兼容接口
-        super().__init__(user_id, model, train_loader, learning_rate, device,
-                        optimizer_type, momentum, weight_decay)
+        super().__init__(
+            user_id,
+            model,
+            train_loader,
+            learning_rate,
+            device,
+            optimizer_type,
+            momentum,
+            weight_decay,
+        )
+        self.generator = DiffusionGenerator(
+            num_classes=model.num_classes,
+            signal_length=model.signal_length,
+            timesteps=diffusion_steps,
+        ).to(device)
+        self.gen_optimizer = torch.optim.Adam(self.generator.parameters(), lr=gen_learning_rate)
+        self.last_gen_loss = 0.0
         
     def train(self, epochs):
         """
-        本地模型训练
+        本地模型训练：FedDDPM 思路，分类器 + 扩散模型同时优化
         """
         self.model.train()
+        self.generator.train()
         
-        total_loss = 0.0
-        num_batches = 0
+        total_cls_loss = 0.0
+        total_gen_loss = 0.0
+        num_cls_batches = 0
+        num_gen_batches = 0
         
         for epoch in range(epochs):
-            epoch_loss = 0.0
             for X, y in self.train_loader:
                 X, y = X.to(self.device), y.to(self.device)
                 
@@ -43,18 +60,29 @@ class UserFedDiff(User):
                 loss.backward()
                 self.optimizer.step()
                 
-                epoch_loss += loss.item()
-                num_batches += 1
-            
-            total_loss += epoch_loss
+                total_cls_loss += loss.item()
+                num_cls_batches += 1
+
+                # 扩散模型噪声预测训练
+                self.gen_optimizer.zero_grad()
+                diff_loss = self.generator.training_loss(X, y)
+                diff_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
+                self.gen_optimizer.step()
+
+                total_gen_loss += diff_loss.item()
+                num_gen_batches += 1
         
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        return avg_loss
+        avg_cls_loss = total_cls_loss / num_cls_batches if num_cls_batches > 0 else 0.0
+        avg_gen_loss = total_gen_loss / num_gen_batches if num_gen_batches > 0 else 0.0
+        self.last_gen_loss = avg_gen_loss
+        return {"cls_loss": avg_cls_loss, "gen_loss": avg_gen_loss}
 
     def get_generator_parameters(self):
-        """兼容接口，返回空或None"""
-        return None
+        """返回扩散模型参数，供服务器聚合"""
+        return copy.deepcopy(self.generator.state_dict())
 
     def set_generator_parameters(self, params):
-        """兼容接口，不做任何操作"""
-        pass
+        """从服务器下发的全局扩散模型参数"""
+        if params is not None:
+            self.generator.load_state_dict(copy.deepcopy(params))
