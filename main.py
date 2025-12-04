@@ -21,12 +21,14 @@ from FLAlgorithms.trainmodel.diffusion import DiffusionAligner
 from FLAlgorithms.users.useravg import UserAVG
 from FLAlgorithms.users.userFedProx import UserFedProx
 from FLAlgorithms.users.userpFedGen import UserFedGen
+from FLAlgorithms.users.userFedDiff import UserFedDiff
 from FLAlgorithms.users.userFDAM import UserFDAM
 
 # 导入服务器
 from FLAlgorithms.servers.serveravg import ServerAVG
 from FLAlgorithms.servers.serverFedProx import ServerFedProx
 from FLAlgorithms.servers.serverpFedGen import ServerFedGen
+from FLAlgorithms.servers.serverfeddiff import ServerFedDiff
 from FLAlgorithms.servers.serverFDAM import ServerFDAM
 
 # 导入工具函数
@@ -48,12 +50,12 @@ def parse_args():
                        help='预处理数据目录')
     
     # 算法参数
-    parser.add_argument('--algorithm', type=str, default='FedAvg',
-                       choices=['FedAvg', 'FedProx', 'FedGen', 'FDAM'],
+    parser.add_argument('--algorithm', type=str, default='FDAM',
+                       choices=['FedAvg', 'FedProx', 'FedGen', 'FedDiff', 'FDAM'],
                        help='联邦学习算法')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='MCLDNN',
+    parser.add_argument('--model', type=str, default='CNN1D',
                        choices=['CNN1D', 'ResNet1D', 'MCLDNN'],
                        help='模型架构')
     
@@ -72,7 +74,7 @@ def parse_args():
                        help='学习率')
     
     # 优化器参数
-    parser.add_argument('--optimizer', type=str, default='adamw',
+    parser.add_argument('--optimizer', type=str, default='adam',
                        choices=['sgd', 'adam', 'adamw'],
                        help='优化器类型（默认：adam）')
     parser.add_argument('--momentum', type=float, default=0.9,
@@ -81,7 +83,7 @@ def parse_args():
                        help='权重衰减（L2 正则化）')
     
     # Non-IID 参数
-    parser.add_argument('--non_iid_type', type=str, default='iid',
+    parser.add_argument('--non_iid_type', type=str, default='class',
                        choices=['iid', 'class', 'snr'],
                        help='数据划分类型')
     parser.add_argument('--alpha', type=float, default=0.5,
@@ -96,6 +98,16 @@ def parse_args():
                        help='生成器学习率')
     parser.add_argument('--latent_dim', type=int, default=100,
                        help='潜在向量维度')
+                       
+    # FedDiff 参数
+    parser.add_argument('--pseudo_batch_size', type=int, default=32,
+                       help='扩散生成伪样本的批大小')
+    parser.add_argument('--distill_steps', type=int, default=1,
+                       help='每轮扩散蒸馏步数')
+    parser.add_argument('--distill_lr', type=float, default=0.001,
+                       help='蒸馏阶段学习率')
+    # parser.add_argument('--diffusion_steps', type=int, default=50,
+    #                    help='扩散时间步数')
 
     # FDAM 参数
     parser.add_argument('--diffusion_steps', type=int, default=10,
@@ -110,12 +122,13 @@ def parse_args():
                        help='FDAM 聚合时基于分布偏移的惩罚系数')
     parser.add_argument('--align_noise_std', type=float, default=0.1,
                        help='FDAM 特征加噪标准差')
-    
     # 输出参数
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='输出目录')
     
     # 设备参数
+    parser.add_argument('--gpu_id', type=int, default=3,
+                       help='指定使用的GPU ID')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='设备 (cuda 或 cpu)')
     
@@ -124,6 +137,7 @@ def parse_args():
                        help='随机种子')
     
     return parser.parse_args()
+
 
 
 def set_seed(seed):
@@ -139,7 +153,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def create_users(algorithm, num_clients, model, train_loaders, args, feature_dim=None):
+def create_users(algorithm, num_clients, model, train_loaders, args):
     """
     创建客户端列表
     
@@ -185,12 +199,11 @@ def create_users(algorithm, num_clients, model, train_loaders, args, feature_dim
             users.append(user)
     
     elif algorithm == 'FedGen':
-        embed_dim = feature_dim if feature_dim is not None else 256
         for i in range(num_clients):
-            # 创建生成器（嵌入维度对齐分类器特征维度）
+            # 创建生成器（嵌入维度设为 256，与分类器 fc1 层一致）
             generator = Generator(
                 latent_dim=args.latent_dim,
-                embedding_dim=embed_dim,
+                embedding_dim=256,
                 hidden_dim=512
             )
             
@@ -203,16 +216,32 @@ def create_users(algorithm, num_clients, model, train_loaders, args, feature_dim
                 gen_learning_rate=args.gen_learning_rate,
                 device=args.device,
                 latent_dim=args.latent_dim,
-                feature_dim=embed_dim,
                 optimizer_type=args.optimizer,
                 momentum=args.momentum,
                 weight_decay=args.weight_decay
             )
             users.append(user)
 
+    elif algorithm == 'FedDiff':
+        for i in range(num_clients):
+            user = UserFedDiff(
+                user_id=i,
+                model=get_model(args.model, model.num_classes, model.signal_length),
+                train_loader=train_loaders[i],
+                learning_rate=args.learning_rate,
+                device=args.device,
+                optimizer_type=args.optimizer,
+                momentum=args.momentum,
+                weight_decay=args.weight_decay,
+                diffusion_steps=args.diffusion_steps,
+                gen_learning_rate=args.distill_lr
+            )
+            users.append(user)
+
     elif algorithm == 'FDAM':
-        # 预计算特征维度
-        feat_dim = feature_dim
+        with torch.no_grad():
+            dummy = torch.zeros(1, 2, model.signal_length)
+            feat_dim = model.extract_features(dummy).shape[-1]
         for i in range(num_clients):
             aligner = DiffusionAligner(
                 feature_dim=feat_dim,
@@ -235,11 +264,10 @@ def create_users(algorithm, num_clients, model, train_loaders, args, feature_dim
                 noise_std=args.align_noise_std
             )
             users.append(user)
-    
     return users
 
 
-def create_server(algorithm, model, users, args, feature_dim=None):
+def create_server(algorithm, model, users, args):
     """
     创建服务器
     
@@ -269,11 +297,10 @@ def create_server(algorithm, model, users, args, feature_dim=None):
         )
     
     elif algorithm == 'FedGen':
-        embed_dim = feature_dim if feature_dim is not None else 256
         # 创建全局生成器
         generator = Generator(
             latent_dim=args.latent_dim,
-            embedding_dim=embed_dim,
+            embedding_dim=256,
             hidden_dim=512
         )
         
@@ -283,6 +310,18 @@ def create_server(algorithm, model, users, args, feature_dim=None):
             users=users,
             num_rounds=args.num_rounds,
             device=args.device
+        )
+
+    elif algorithm == 'FedDiff':
+        server = ServerFedDiff(
+            model=model,
+            users=users,
+            num_rounds=args.num_rounds,
+            device=args.device,
+            pseudo_batch_size=args.pseudo_batch_size,
+            distill_steps=args.distill_steps,
+            distill_lr=args.distill_lr,
+            diffusion_steps=args.diffusion_steps,
         )
 
     elif algorithm == 'FDAM':
@@ -304,7 +343,7 @@ def create_server(algorithm, model, users, args, feature_dim=None):
             align_beta=args.align_beta,
             device=args.device
         )
-    
+        
     return server
 
 
@@ -312,6 +351,11 @@ def main():
     """主函数"""
     # 解析参数
     args = parse_args()
+    
+    # 设置GPU
+    if args.device == 'cuda' and torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu_id)
+        args.device = f'cuda:{args.gpu_id}'
     
     # 设置随机种子
     set_seed(args.seed)
@@ -331,6 +375,8 @@ def main():
     logger.info("=" * 80)
     logger.info(f"数据集: {args.dataset}")
     logger.info(f"SNR: {args.data_snr}")
+    logger.info(f"划分类型: {args.non_iid_type}")
+    logger.info(f"狄利克雷参数: {args.alpha}")
     logger.info(f"算法: {args.algorithm}")
     logger.info(f"模型: {args.model}")
     logger.info(f"客户端数量: {args.num_clients}")
@@ -369,20 +415,15 @@ def main():
     logger.info("创建模型...")
     global_model = get_model(args.model, num_classes, signal_length)
     logger.info(f"模型参数数量: {sum(p.numel() for p in global_model.parameters())}")
-
-    # 预计算特征维度，供 FedGen/FDAM 使用
-    with torch.no_grad():
-        dummy = torch.zeros(1, 2, signal_length)
-        feature_dim = global_model.extract_features(dummy).shape[-1]
     
     # 创建客户端
     logger.info("创建客户端...")
-    users = create_users(args.algorithm, args.num_clients, global_model, train_loaders, args, feature_dim)
+    users = create_users(args.algorithm, args.num_clients, global_model, train_loaders, args)
     logger.info(f"已创建 {len(users)} 个客户端")
     
     # 创建服务器
     logger.info("创建服务器...")
-    server = create_server(args.algorithm, global_model, users, args, feature_dim)
+    server = create_server(args.algorithm, global_model, users, args)
     
     # 开始训练
     logger.info("=" * 80)
@@ -434,7 +475,7 @@ def main():
     
     # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
     params_str = f"{args.num_clients}_{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
-    final_dirname = f"{args.dataset}_{args.data_snr}_{args.algorithm}_{args.model}_{final_acc:.2f}pct_{params_str}_{timestamp}"
+    final_dirname = f"{args.dataset}_{args.data_snr}_{args.non_iid_type}_{args.alpha}_{args.algorithm}_{args.model}_{final_acc:.2f}_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
     
     # 重命名临时目录为最终目录

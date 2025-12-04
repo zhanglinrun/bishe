@@ -44,14 +44,15 @@ class ServerAVG(Server):
         # 更新全局模型
         self.model.load_state_dict(global_params)
     
-    def train(self, test_loader, local_epochs, logger=None):
+    def train(self, eval_loader, local_epochs, logger=None, eval_name="Eval"):
         """
         FedAvg 训练流程
         
         Args:
-            test_loader: 测试数据加载器
+            eval_loader: 评估数据加载器（建议传入验证集）
             local_epochs: 本地训练轮数
             logger: 日志记录器
+            eval_name: 日志标签，区分 Val/Test
         """
         for round_num in range(1, self.num_rounds + 1):
             # 发送全局模型给客户端
@@ -68,18 +69,18 @@ class ServerAVG(Server):
             # 聚合客户端模型
             self.aggregate_parameters()
             
-            # 在测试集上评估
-            accuracy, test_loss = self.evaluate(test_loader)
+            # 在评估集上评估
+            accuracy, eval_loss = self.evaluate(eval_loader)
             
             # 记录
-            self.train_losses.append(test_loss)
+            self.train_losses.append(eval_loss)
             self.train_accuracies.append(accuracy)
             
             # 日志输出
             message = f"Round {round_num}/{self.num_rounds} | " \
                      f"Local Loss: {avg_local_loss:.4f} | " \
-                     f"Test Loss: {test_loss:.4f} | " \
-                     f"Test Accuracy: {accuracy:.2f}%"
+                     f"{eval_name} Loss: {eval_loss:.4f} | " \
+                     f"{eval_name} Accuracy: {accuracy:.2f}%"
             
             if logger:
                 logger.info(message)

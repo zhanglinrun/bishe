@@ -220,9 +220,9 @@ def _load_hisar_file(file_path):
     return X, y.astype(np.int64), snr
 
 
-def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, random_state=42):
+def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, random_state=42):
     """
-    按SNR分割数据集并立即保存
+    按 SNR 分割数据集并立即保存，比例 6:2:2 (train:val:test)
     
     Args:
         X: 数据
@@ -230,11 +230,10 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         snr: SNR值
         output_dir: 输出目录
         dataset_name: 数据集名称
-        test_size: 测试集比例
         random_state: 随机种子
         
     Returns:
-        snr_info: 字典，键为SNR值，值为 (train_shape, test_shape)
+        snr_info: 字典，键为SNR值，值为 (train_shape, val_shape, test_shape)
     """
     unique_snrs = np.sort(np.unique(snr))
     print(f"\nSNR值范围: {unique_snrs}")
@@ -242,8 +241,10 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
     
     # 创建输出目录
     train_dir = os.path.join(output_dir, dataset_name, 'train')
+    val_dir = os.path.join(output_dir, dataset_name, 'val')
     test_dir = os.path.join(output_dir, dataset_name, 'test')
     os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
     os.makedirs(test_dir, exist_ok=True)
     
     print(f"\n保存数据到 {os.path.join(output_dir, dataset_name)}")
@@ -264,20 +265,32 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         unique, counts = np.unique(y_snr, return_counts=True)
         print(f"  类别分布: {dict(zip(unique, counts))}")
         
-        # 分层抽样划分
-        train_X, test_X, train_y, test_y = train_test_split(
+        # 第一次划分：train 与 temp (val+test)
+        train_X, temp_X, train_y, temp_y = train_test_split(
             X_snr, y_snr,
-            test_size=test_size,
+            test_size=0.4,  # 留出 40% 做 val+test
             stratify=y_snr,
             random_state=random_state
         )
         
-        print(f"  训练集: {len(train_X)}, 测试集: {len(test_X)}")
+        # 第二次划分：val 与 test（各 20%）
+        val_X, test_X, val_y, test_y = train_test_split(
+            temp_X, temp_y,
+            test_size=0.5,
+            stratify=temp_y,
+            random_state=random_state
+        )
+        
+        print(f"  训练集: {len(train_X)}, 验证集: {len(val_X)}, 测试集: {len(test_X)}")
         
         # 立即保存，包含原始 SNR，后续 Non-IID SNR 划分直接使用真实值
         train_file = os.path.join(train_dir, f"{int(snr_val)}dB.pkl")
         with open(train_file, 'wb') as f:
             pickle.dump((train_X, train_y, np.full(len(train_X), snr_val)), f, protocol=4)
+        
+        val_file = os.path.join(val_dir, f"{int(snr_val)}dB.pkl")
+        with open(val_file, 'wb') as f:
+            pickle.dump((val_X, val_y, np.full(len(val_X), snr_val)), f, protocol=4)
         
         test_file = os.path.join(test_dir, f"{int(snr_val)}dB.pkl")
         with open(test_file, 'wb') as f:
@@ -286,10 +299,10 @@ def split_and_save_by_snr(X, y, snr, output_dir, dataset_name, test_size=0.3, ra
         print(f"  已保存 {int(snr_val)}dB")
         
         # 保存形状信息用于后续合并
-        snr_info[snr_val] = (train_X.shape, test_X.shape)
+        snr_info[snr_val] = (train_X.shape, val_X.shape, test_X.shape)
         
         # 释放内存
-        del X_snr, y_snr, train_X, test_X, train_y, test_y
+        del X_snr, y_snr, train_X, train_y, val_X, val_y, test_X, test_y, temp_X, temp_y
         gc.collect()
     
     return snr_info

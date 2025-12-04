@@ -234,10 +234,13 @@ def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
         np.random.shuffle(indices)
         result.append((X[indices], y[indices]))
 
-    # 若存在空客户端，降级为 IID 划分，避免无样本客户端参与聚合
-    if any(len(pair[1]) == 0 for pair in result):
-        print("警告: Dirichlet 划分产生空客户端，降级为 IID 划分")
+    # 覆盖检查与回退
+    empty_clients = [idx for idx, pair in enumerate(result) if len(pair[1]) == 0]
+    if empty_clients:
+        print(f"警告: Dirichlet 划分产生空客户端 {empty_clients}，降级为 IID 划分")
         return split_data_iid(X, y, snr, num_clients)
+    class_coverage = [np.unique(pair[1]).size for pair in result]
+    print(f"每个客户端覆盖的类别数: {class_coverage}")
     
     return result
 
@@ -267,6 +270,12 @@ def split_data_non_iid_snr(X, y, snr, num_clients):
         mask = np.isin(snr, snr_range)
         indices = np.where(mask)[0]
         client_data.append((X[indices], y[indices]))
+
+    # 若存在空客户端（例如客户端数量多于 SNR 段），回退为 IID 划分
+    empty_clients = [idx for idx, pair in enumerate(client_data) if len(pair[1]) == 0]
+    if empty_clients:
+        print(f"警告: SNR 划分产生空客户端 {empty_clients}，降级为 IID 划分")
+        return split_data_iid(X, y, snr, num_clients)
     
     return client_data
 
@@ -283,12 +292,16 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     Returns:
         X_train: 训练数据
         y_train: 训练标签
+        X_val: 验证数据
+        y_val: 验证标签
         X_test: 测试数据
         y_test: 测试标签
+        snr_train/val/test: 对应 SNR
         num_classes: 类别数
     """
     # 构造文件路径
     train_file = os.path.join(data_dir, dataset_name, 'train', f'{data_snr}.pkl')
+    val_file = os.path.join(data_dir, dataset_name, 'val', f'{data_snr}.pkl')
     test_file = os.path.join(data_dir, dataset_name, 'test', f'{data_snr}.pkl')
     
     # 加载训练集
@@ -305,6 +318,28 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
             except ValueError:
                 snr_val = 0.0
             snr_train = np.full(len(X_train), snr_val)
+    
+    # 加载验证集（若不存在则从训练集切分 8:2 临时生成，保持向后兼容）
+    if os.path.exists(val_file):
+        with open(val_file, 'rb') as f:
+            loaded = pickle.load(f)
+            if len(loaded) == 3:
+                X_val, y_val, snr_val_arr = loaded
+            else:
+                X_val, y_val = loaded
+                try:
+                    snr_val_num = float(str(data_snr).replace('dB', ''))
+                except ValueError:
+                    snr_val_num = 0.0
+                snr_val_arr = np.full(len(X_val), snr_val_num)
+    else:
+        print(f"警告: 验证集文件不存在: {val_file}，将从训练集中临时划分 80/20")
+        rng = np.random.default_rng(seed=42)
+        indices = rng.permutation(len(y_train))
+        split = int(len(indices) * 0.8)
+        train_idx, val_idx = indices[:split], indices[split:]
+        X_val, y_val, snr_val_arr = X_train[val_idx], y_train[val_idx], snr_train[val_idx]
+        X_train, y_train, snr_train = X_train[train_idx], y_train[train_idx], snr_train[train_idx]
     
     # 加载测试集
     if not os.path.exists(test_file):
@@ -327,11 +362,12 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     
     print(f"从预处理文件加载数据:")
     print(f"  训练集: {train_file}")
+    print(f"  验证集: {val_file if os.path.exists(val_file) else '临时划分'}")
     print(f"  测试集: {test_file}")
-    print(f"  训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
+    print(f"  训练样本数: {len(X_train)}, 验证样本数: {len(X_val)}, 测试样本数: {len(X_test)}")
     print(f"  数据形状: {X_train.shape}")
     
-    return X_train, y_train, X_test, y_test, snr_train, snr_test, num_classes
+    return X_train, y_train, X_val, y_val, X_test, y_test, snr_train, snr_val_arr, snr_test, num_classes
 
 
 def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid', 
@@ -350,13 +386,16 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
         
     Returns:
         train_loaders: 列表，每个元素是一个客户端的 DataLoader
+        val_loader: 全局验证集 DataLoader
         test_loader: 全局测试集 DataLoader
         num_classes: 类别数
     """
     # 加载预处理的数据
-    X_train, y_train, X_test, y_test, snr_train, snr_test, num_classes = load_preprocessed_data(
-        dataset_name, data_snr, data_dir
-    )
+    (X_train, y_train,
+     X_val, y_val,
+     X_test, y_test,
+     snr_train, snr_val, snr_test,
+     num_classes) = load_preprocessed_data(dataset_name, data_snr, data_dir)
     
     # 如果旧格式缺少 SNR（snr_train 为常数），在 100dB/highsnr 情况下给出提示
     if non_iid_type == 'snr':
@@ -381,7 +420,9 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
         train_loaders.append(loader)
     
-    # 创建全局测试集 DataLoader
+    # 创建全局验证/测试集 DataLoader
+    val_dataset = SignalDataset(X_val, y_val)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     test_dataset = SignalDataset(X_test, y_test)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
@@ -390,5 +431,5 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
     print(f"客户端数量: {num_clients}, 划分类型: {non_iid_type}")
     print(f"每个客户端平均样本数: {len(y_train) // num_clients}")
     
-    return train_loaders, test_loader, num_classes
+    return train_loaders, val_loader, test_loader, num_classes
 

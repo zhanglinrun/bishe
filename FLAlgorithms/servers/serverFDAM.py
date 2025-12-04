@@ -91,7 +91,7 @@ class ServerFDAM(Server):
         # 聚合原型
         self.aggregate_prototypes(prototype_reports)
 
-    def train(self, test_loader, local_epochs, logger=None):
+    def train(self, eval_loader, local_epochs, logger=None, eval_name="Eval"):
         for round_num in range(1, self.num_rounds + 1):
             self.send_parameters()
 
@@ -104,11 +104,11 @@ class ServerFDAM(Server):
 
             self.aggregate_parameters()
 
-            accuracy, test_loss = self.evaluate(test_loader)
-            self.train_losses.append(test_loss)
+            accuracy, eval_loss = self.evaluate(eval_loader)
+            self.train_losses.append(eval_loss)
             self.train_accuracies.append(accuracy)
 
-            msg = f"[FDAM] Round {round_num}/{self.num_rounds} | Local Loss: {avg_local_loss:.4f} | Test Loss: {test_loss:.4f} | Acc: {accuracy:.2f}%"
+            msg = f"[FDAM] Round {round_num}/{self.num_rounds} | Local Loss: {avg_local_loss:.4f} | {eval_name} Loss: {eval_loss:.4f} | Acc: {accuracy:.2f}%"
             if logger:
                 logger.info(msg)
             else:
