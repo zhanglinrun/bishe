@@ -60,11 +60,11 @@ def parse_args():
                        help='模型架构')
     
     # 联邦学习参数
-    parser.add_argument('--num_clients', type=int, default=10,
+    parser.add_argument('--num_clients', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--num_rounds', type=int, default=40,
+    parser.add_argument('--num_rounds', type=int, default=30,
                        help='训练轮次')
-    parser.add_argument('--local_epochs', type=int, default=10,
+    parser.add_argument('--local_epochs', type=int, default=5,
                        help='本地训练轮数')
     
     # 训练参数
@@ -100,12 +100,20 @@ def parse_args():
                        help='潜在向量维度')
                        
     # FedDiff 参数
-    parser.add_argument('--pseudo_batch_size', type=int, default=32,
+    parser.add_argument('--pseudo_batch_size', type=int, default=8,
                        help='扩散生成伪样本的批大小')
-    parser.add_argument('--distill_steps', type=int, default=1,
+    parser.add_argument('--distill_steps', type=int, default=2,
                        help='每轮扩散蒸馏步数')
-    parser.add_argument('--distill_lr', type=float, default=0.001,
+    parser.add_argument('--distill_lr', type=float, default=0.0001,
                        help='蒸馏阶段学习率')
+    parser.add_argument('--pseudo_start_round', type=int, default=20,
+                       help='从第几轮开始使用生成伪样本训练全局模型（FedDiff 稳定性）')
+    parser.add_argument('--pseudo_conf_thresh', type=float, default=0.95,
+                       help='仅对置信度高于阈值的伪样本进行自训练')
+    parser.add_argument('--pseudo_loss_weight', type=float, default=0.05,
+                       help='伪样本自训练损失权重，避免破坏真实数据学习')
+    parser.add_argument('--pseudo_ramp_rounds', type=int, default=10,
+                       help='伪样本蒸馏的热身轮数，逐步增加步数与权重以防早期破坏')
     # parser.add_argument('--diffusion_steps', type=int, default=50,
     #                    help='扩散时间步数')
 
@@ -127,7 +135,7 @@ def parse_args():
                        help='输出目录')
     
     # 设备参数
-    parser.add_argument('--gpu_id', type=int, default=3,
+    parser.add_argument('--gpu_id', type=int, default=0,
                        help='指定使用的GPU ID')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='设备 (cuda 或 cpu)')
@@ -322,6 +330,10 @@ def create_server(algorithm, model, users, args):
             distill_steps=args.distill_steps,
             distill_lr=args.distill_lr,
             diffusion_steps=args.diffusion_steps,
+            pseudo_start_round=args.pseudo_start_round,
+            pseudo_conf_thresh=args.pseudo_conf_thresh,
+            pseudo_loss_weight=args.pseudo_loss_weight,
+            pseudo_ramp_rounds=args.pseudo_ramp_rounds,
         )
 
     elif algorithm == 'FDAM':
