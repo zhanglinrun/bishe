@@ -54,3 +54,4 @@ dataset/RML2018a/
 data_processed/
 
 results/
+pretrained_diffusion.pt

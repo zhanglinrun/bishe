@@ -1,6 +1,6 @@
 """
 联邦学习自动调制识别主程序
-支持 FedAvg, FedProx, FedGen 三种算法
+支持 FedAvg, FedProx, FedGen, FedDiff, FDAM 算法
 """
 
 import argparse
@@ -50,7 +50,7 @@ def parse_args():
                        help='预处理数据目录')
     
     # 算法参数
-    parser.add_argument('--algorithm', type=str, default='FDAM',
+    parser.add_argument('--algorithm', type=str, default='FedDiff',
                        choices=['FedAvg', 'FedProx', 'FedGen', 'FedDiff', 'FDAM'],
                        help='联邦学习算法')
     
@@ -100,26 +100,22 @@ def parse_args():
                        help='潜在向量维度')
                        
     # FedDiff 参数
-    parser.add_argument('--pseudo_batch_size', type=int, default=8,
+    parser.add_argument('--pseudo_batch_size', type=int, default=128,
                        help='扩散生成伪样本的批大小')
-    parser.add_argument('--distill_steps', type=int, default=2,
-                       help='每轮扩散蒸馏步数')
-    parser.add_argument('--distill_lr', type=float, default=0.0001,
+    parser.add_argument('--distill_steps', type=int, default=5,
+                       help='每轮扩散蒸馏/校正步数')
+    parser.add_argument('--distill_lr', type=float, default=0.0002,
                        help='蒸馏阶段学习率')
-    parser.add_argument('--pseudo_start_round', type=int, default=20,
+    parser.add_argument('--pseudo_start_round', type=int, default=0,
                        help='从第几轮开始使用生成伪样本训练全局模型（FedDiff 稳定性）')
-    parser.add_argument('--pseudo_conf_thresh', type=float, default=0.95,
-                       help='仅对置信度高于阈值的伪样本进行自训练')
-    parser.add_argument('--pseudo_loss_weight', type=float, default=0.05,
-                       help='伪样本自训练损失权重，避免破坏真实数据学习')
-    parser.add_argument('--pseudo_ramp_rounds', type=int, default=10,
-                       help='伪样本蒸馏的热身轮数，逐步增加步数与权重以防早期破坏')
-    # parser.add_argument('--diffusion_steps', type=int, default=50,
-    #                    help='扩散时间步数')
+    parser.add_argument('--guidance_scale', type=float, default=2.0,
+                       help='扩散模型采样引导系数')
+    parser.add_argument('--pretrained_diffusion', type=str, default='pretrained_diffusion.pt',
+                       help='预训练扩散模型路径 (推荐使用!)')
 
     # FDAM 参数
-    parser.add_argument('--diffusion_steps', type=int, default=10,
-                       help='FDAM 扩散步数（用于控制对齐难度的超参，当前实现为单步去噪）')
+    parser.add_argument('--diffusion_steps', type=int, default=1000,
+                       help='扩散步数')
     parser.add_argument('--align_hidden', type=int, default=256,
                        help='FDAM 对齐模块隐藏维度')
     parser.add_argument('--lambda_diff', type=float, default=0.5,
@@ -135,7 +131,7 @@ def parse_args():
                        help='输出目录')
     
     # 设备参数
-    parser.add_argument('--gpu_id', type=int, default=0,
+    parser.add_argument('--gpu_id', type=int, default=1,
                        help='指定使用的GPU ID')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='设备 (cuda 或 cpu)')
@@ -164,16 +160,6 @@ def set_seed(seed):
 def create_users(algorithm, num_clients, model, train_loaders, args):
     """
     创建客户端列表
-    
-    Args:
-        algorithm: 算法名称
-        num_clients: 客户端数量
-        model: 模型
-        train_loaders: 训练数据加载器列表
-        args: 参数
-        
-    Returns:
-        客户端列表
     """
     users = []
     
@@ -208,7 +194,6 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
     
     elif algorithm == 'FedGen':
         for i in range(num_clients):
-            # 创建生成器（嵌入维度设为 256，与分类器 fc1 层一致）
             generator = Generator(
                 latent_dim=args.latent_dim,
                 embedding_dim=256,
@@ -244,6 +229,14 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
                 diffusion_steps=args.diffusion_steps,
                 gen_learning_rate=args.distill_lr
             )
+            
+            # [关键] 如果有预训练生成器，加载给每个客户端作为起点
+            if args.pretrained_diffusion and os.path.exists(args.pretrained_diffusion):
+                try:
+                    user.generator.load_state_dict(torch.load(args.pretrained_diffusion, map_location=args.device))
+                except Exception as e:
+                    print(f"Client {i} failed to load pretrained diffusion: {e}")
+                    
             users.append(user)
 
     elif algorithm == 'FDAM':
@@ -278,15 +271,6 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
 def create_server(algorithm, model, users, args):
     """
     创建服务器
-    
-    Args:
-        algorithm: 算法名称
-        model: 全局模型
-        users: 客户端列表
-        args: 参数
-        
-    Returns:
-        服务器实例
     """
     if algorithm == 'FedAvg':
         server = ServerAVG(
@@ -305,7 +289,6 @@ def create_server(algorithm, model, users, args):
         )
     
     elif algorithm == 'FedGen':
-        # 创建全局生成器
         generator = Generator(
             latent_dim=args.latent_dim,
             embedding_dim=256,
@@ -331,10 +314,11 @@ def create_server(algorithm, model, users, args):
             distill_lr=args.distill_lr,
             diffusion_steps=args.diffusion_steps,
             pseudo_start_round=args.pseudo_start_round,
-            pseudo_conf_thresh=args.pseudo_conf_thresh,
-            pseudo_loss_weight=args.pseudo_loss_weight,
-            pseudo_ramp_rounds=args.pseudo_ramp_rounds,
+            guidance_scale=args.guidance_scale
         )
+        # [关键] 加载预训练生成器到服务器
+        if args.pretrained_diffusion and os.path.exists(args.pretrained_diffusion):
+            server.load_generator(args.pretrained_diffusion)
 
     elif algorithm == 'FDAM':
         with torch.no_grad():
@@ -505,4 +489,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

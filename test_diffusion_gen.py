@@ -27,6 +27,9 @@ def load_data(data_dir, snr):
     train_file = os.path.join(data_dir, 'train', f'{snr}.pkl')
     test_file = os.path.join(data_dir, 'test', f'{snr}.pkl')
     
+    if not os.path.exists(train_file):
+        raise FileNotFoundError(f"训练数据文件未找到: {train_file}")
+        
     with open(train_file, "rb") as f:
         X_train, y_train, _ = pickle.load(f)
     with open(test_file, "rb") as f:
@@ -96,11 +99,16 @@ def train_classifier(model, train_loader, test_loader, epochs=30, device="cuda",
     model.load_state_dict(best_state)
     return best_acc
 
-def train_diffusion(diffusion, train_loader, epochs=100, device="cuda", lr=1e-4, cfg_prob=0.1):
+def train_diffusion(diffusion, train_loader, epochs=100, device="cuda", lr=1e-4, cfg_prob=0.1, save_path="diffusion_model.pt"):
+    """
+    训练扩散模型并保存权重
+    """
     diffusion.to(device)
     diffusion.train()
     optimizer = optim.AdamW(diffusion.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    best_loss = float('inf')
 
     for epoch in range(epochs):
         total_loss = 0.0
@@ -114,9 +122,20 @@ def train_diffusion(diffusion, train_loader, epochs=100, device="cuda", lr=1e-4,
             total_loss += loss.item()
         
         scheduler.step()
+        avg_loss = total_loss / len(train_loader)
         
+        # 保存最佳 Loss 模型（可选，这里简单起见，每10轮或结束时保存）
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            # 可以在这里保存最佳检查点
+            # torch.save(diffusion.state_dict(), save_path.replace('.pt', '_best.pt'))
+
         if (epoch + 1) % 10 == 0:
-            print(f"[Diffusion] Epoch {epoch+1}/{epochs} | Avg Loss: {total_loss/len(train_loader):.6f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
+            print(f"[Diffusion] Epoch {epoch+1}/{epochs} | Avg Loss: {avg_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
+
+    # 训练结束后保存最终模型
+    torch.save(diffusion.state_dict(), save_path)
+    print(f"Diffusion model saved to {save_path}")
 
 def evaluate_generated_quality(classifier, diffusion, num_classes, samples_per_class=200, device="cuda", guidance_scale=3.0):
     classifier.eval()
@@ -194,6 +213,7 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--cfg_prob", type=float, default=0.1, help="训练时丢弃条件的概率")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--save_path", default="pretrained_diffusion.pt", help="扩散模型权重保存路径")
     args = parser.parse_args()
 
     set_seed(42)
@@ -226,11 +246,11 @@ def main():
     )
     
     train_diffusion(diffusion, train_loader, epochs=args.epochs, device=args.device, 
-                   lr=args.lr, cfg_prob=args.cfg_prob)
+                   lr=args.lr, cfg_prob=args.cfg_prob, save_path=args.save_path)
     
     print("\n=== 3. 评估生成质量与绘图 ===")
     # 选取效果最好的 Scale 进行绘图，通常 2.0 - 4.0 之间
-    scales = [1.0, 3.0, 5.0]
+    scales = [1.0, 3.0]
     best_gen_acc = 0
     best_gen_preds = []
     best_gen_labels = []
