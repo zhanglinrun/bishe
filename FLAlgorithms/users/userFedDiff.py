@@ -11,8 +11,6 @@ class UserFedDiff(User):
         super().__init__(user_id, model, train_loader, learning_rate, device,
                         optimizer_type, momentum, weight_decay)
         
-        # 初始化新的 U-Net 扩散生成器
-        # 参数需与 test_diffusion_gen.py 中保持一致
         self.generator = DiffusionGenerator(
             num_classes=model.num_classes,
             signal_length=model.signal_length,
@@ -23,21 +21,39 @@ class UserFedDiff(User):
             beta_schedule="cosine"
         ).to(device)
         
-        # 生成器通常使用 AdamW 优化器
-        self.gen_optimizer = torch.optim.AdamW(self.generator.parameters(), lr=gen_learning_rate, weight_decay=1e-4)
+        self.gen_optimizer = torch.optim.AdamW(self.generator.parameters(), lr=gen_learning_rate, weight_decay=weight_decay)
+        self.cfg_prob = 0.1
         
-        # 用于 CFG 训练的 dropout 概率
-        self.cfg_prob = 0.1 
+        # 初始学习率记录
+        self.initial_lr = learning_rate
+        self.initial_gen_lr = gen_learning_rate
     
     def set_generator_parameters(self, params):
-        """接收全局生成器参数"""
         self.generator.load_state_dict(copy.deepcopy(params))
 
     def get_generator_parameters(self):
-        """上传本地生成器参数"""
         return copy.deepcopy(self.generator.state_dict())
 
-    def train(self, epochs):
+    def update_learning_rate(self, round_num):
+        """简单的学习率衰减策略"""
+        if round_num > 0:
+            # 每 10 轮衰减 0.8
+            decay = 0.95 ** round_num
+            
+            # 更新分类器学习率
+            new_lr = self.initial_lr * decay
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = new_lr
+                
+            # 更新生成器学习率
+            new_gen_lr = self.initial_gen_lr * decay
+            for param_group in self.gen_optimizer.param_groups:
+                param_group['lr'] = new_gen_lr
+
+    def train(self, epochs, round_num=0):
+        # 更新学习率
+        self.update_learning_rate(round_num)
+        
         self.model.train()
         self.generator.train()
         
@@ -52,30 +68,20 @@ class UserFedDiff(User):
                 # --- 1. 训练分类器 ---
                 self.optimizer.zero_grad()
                 outputs = self.model(X)
-                loss = self.criterion(outputs, y)
-                loss.backward()
+                cls_loss = self.criterion(outputs, y)
+                cls_loss.backward()
                 self.optimizer.step()
                 
                 # --- 2. 训练扩散生成器 ---
                 self.gen_optimizer.zero_grad()
-                # 使用支持 CFG 的 loss 计算方法
                 gen_loss = self.generator.training_loss(X, y, cfg_prob=self.cfg_prob)
                 gen_loss.backward()
-                
-                # 梯度裁剪，防止生成器梯度爆炸
                 torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
                 self.gen_optimizer.step()
                 
-                total_loss += loss.item()
+                total_loss += cls_loss.item()
                 total_gen_loss += gen_loss.item()
                 num_batches += 1
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        avg_gen_loss = total_gen_loss / num_batches if num_batches > 0 else 0.0
-        
-        # 返回元组，包含 (分类器损失, 生成器损失)
-        # 注意：Server端接收返回值时需要做相应修改，或者仅打印日志
-        # 为了兼容性，这里我们打印日志，主要返回分类器损失
-        # print(f"Client {self.id} | Cls Loss: {avg_loss:.4f} | Gen Loss: {avg_gen_loss:.4f}")
-        
         return avg_loss

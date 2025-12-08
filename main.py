@@ -106,13 +106,13 @@ def parse_args():
                        help='每轮扩散蒸馏/校正步数')
     parser.add_argument('--distill_lr', type=float, default=0.0002,
                        help='蒸馏阶段学习率')
-    parser.add_argument('--pseudo_start_round', type=int, default=0,
+    parser.add_argument('--pseudo_start_round', type=int, default=10,
                        help='从第几轮开始使用生成伪样本训练全局模型（FedDiff 稳定性）')
-    parser.add_argument('--guidance_scale', type=float, default=2.0,
+    parser.add_argument('--guidance_scale', type=float, default=3.0,
                        help='扩散模型采样引导系数')
-    parser.add_argument('--pretrained_diffusion', type=str, default='pretrained_diffusion.pt',
-                       help='预训练扩散模型路径 (推荐使用!)')
-
+    parser.add_argument('--pretrained_diffusion', type=str, default='',
+                       help='预训练扩散模型路径')
+    # pretrained_diffusion.pt
     # FDAM 参数
     parser.add_argument('--diffusion_steps', type=int, default=1000,
                        help='扩散步数')
