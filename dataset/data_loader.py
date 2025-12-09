@@ -1,7 +1,7 @@
 """
 数据加载器
 支持 RML2016.10a, RML2016.10b, RML2018a, HisarMod 数据集
-支持 IID 和 Non-IID（按类别、按SNR）数据划分
+修复：增加了强制 Z-Score 归一化，确保数据适配扩散模型
 """
 
 import numpy as np
@@ -36,259 +36,9 @@ class SignalDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-def load_RML2016_10a(data_dir='dataset/RML2016.10a'):
-    """
-    加载 RML2016.10a 数据集
-    
-    Returns:
-        X: shape = (N, 2, 128)
-        y: shape = (N,)
-        snr: shape = (N,)
-    """
-    file_path = os.path.join(data_dir, 'RML2016.10a_dict.pkl')
-    
-    with open(file_path, 'rb') as f:
-        data = pickle.load(f, encoding='latin1')
-    
-    # 提取数据
-    X_list, y_list, snr_list = [], [], []
-    
-    # 调制类型到标签的映射
-    mod_classes = sorted(list(set([key[0] for key in data.keys()])))
-    mod_to_label = {mod: idx for idx, mod in enumerate(mod_classes)}
-    
-    for (mod_type, snr_val), samples in data.items():
-        X_list.append(samples)
-        y_list.extend([mod_to_label[mod_type]] * len(samples))
-        snr_list.extend([snr_val] * len(samples))
-    
-    X = np.vstack(X_list)  # (N, 2, 128)
-    y = np.array(y_list)
-    snr = np.array(snr_list)
-    
-    return X, y, snr
-
-
-def load_RML2016_10b(data_dir='dataset/RML2016.10b'):
-    """
-    加载 RML2016.10b 数据集
-    
-    Returns:
-        X: shape = (N, 2, 128)
-        y: shape = (N,)
-        snr: shape = (N,)
-    """
-    file_path = os.path.join(data_dir, 'RML2016.10b.dat')
-    
-    with open(file_path, 'rb') as f:
-        data = pickle.load(f, encoding='latin1')
-    
-    # 提取数据（格式与 10a 相同）
-    X_list, y_list, snr_list = [], [], []
-    
-    mod_classes = sorted(list(set([key[0] for key in data.keys()])))
-    mod_to_label = {mod: idx for idx, mod in enumerate(mod_classes)}
-    
-    for (mod_type, snr_val), samples in data.items():
-        X_list.append(samples)
-        y_list.extend([mod_to_label[mod_type]] * len(samples))
-        snr_list.extend([snr_val] * len(samples))
-    
-    X = np.vstack(X_list)  # (N, 2, 128)
-    y = np.array(y_list)
-    snr = np.array(snr_list)
-    
-    return X, y, snr
-
-
-def load_RML2018a(data_dir='dataset/RML2018a'):
-    """
-    加载 RML2018a 数据集
-    
-    Returns:
-        X: shape = (N, 2, 1024)
-        y: shape = (N,)
-        snr: shape = (N,)
-    """
-    file_path = os.path.join(data_dir, 'GOLD_XYZ_OSC.0001_1024.hdf5')
-    
-    with h5py.File(file_path, 'r') as f:
-        X = f['X'][:]  # (N, 1024, 2)
-        Y = f['Y'][:]  # (N, 24) one-hot
-        Z = f['Z'][:]  # (N, 1) SNR
-    
-    # 转置 X: (N, 1024, 2) -> (N, 2, 1024)
-    X = np.transpose(X, (0, 2, 1))
-    
-    # 将 one-hot 标签转换为整数标签
-    y = np.argmax(Y, axis=1)
-    
-    # 提取 SNR
-    snr = Z.flatten()
-    
-    return X, y, snr
-
-
-def load_HisarMod(data_dir='dataset/HisarMod'):
-    """
-    加载 HisarMod 数据集
-    
-    Returns:
-        X: shape = (N, 2, 1024)
-        y: shape = (N,)
-        snr: shape = (N,)
-    """
-    train_path = os.path.join(data_dir, 'HisarMod2019train.h5')
-    test_path = os.path.join(data_dir, 'HisarMod2019test.h5')
-    
-    X_train, y_train, snr_train = _load_hisar_file(train_path)
-    X_test, y_test, snr_test = _load_hisar_file(test_path)
-    
-    # 合并训练集和测试集
-    X = np.vstack([X_train, X_test])
-    y = np.concatenate([y_train, y_test])
-    snr = np.concatenate([snr_train, snr_test])
-    
-    return X, y, snr
-
-
-def _load_hisar_file(file_path):
-    """加载单个 HisarMod h5 文件"""
-    with h5py.File(file_path, 'r') as f:
-        X = f['samples'][:]  # 假设 shape = (N, 2, 1024)
-        y = f['labels'][:]   # (N,)
-        snr = f['snr'][:]    # (N,)
-    
-    # 确保维度正确
-    if len(X.shape) == 2:
-        # 如果是 (N, 2048)，重塑为 (N, 2, 1024)
-        X = X.reshape(-1, 2, X.shape[1] // 2)
-    
-    return X, y.astype(np.int64), snr
-
-
-def split_data_iid(X, y, snr, num_clients):
-    """
-    IID 数据划分：随机打乱后均匀分配
-    
-    Args:
-        X: 数据
-        y: 标签
-        snr: SNR 值
-        num_clients: 客户端数量
-        
-    Returns:
-        client_data: 列表，每个元素是 (X_client, y_client)
-    """
-    num_samples = len(y)
-    indices = np.random.permutation(num_samples)
-    
-    # 划分索引
-    split_indices = np.array_split(indices, num_clients)
-    
-    client_data = []
-    for client_idx in split_indices:
-        client_data.append((X[client_idx], y[client_idx], snr[client_idx]))
-    
-    return client_data
-
-
-def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
-    """
-    按调制类型 Non-IID 划分：使用 Dirichlet 分布
-    
-    Args:
-        X: 数据
-        y: 标签
-        snr: SNR 值
-        num_clients: 客户端数量
-        alpha: Dirichlet 分布参数（越小越不均衡）
-        
-    Returns:
-        client_data: 列表，每个元素是 (X_client, y_client)
-    """
-    num_classes = len(np.unique(y))
-    client_data = [[] for _ in range(num_clients)]
-    
-    # 为每个类别分配样本到客户端
-    for class_idx in range(num_classes):
-        # 获取该类别的所有样本索引
-        class_indices = np.where(y == class_idx)[0]
-        np.random.shuffle(class_indices)
-        
-        # 使用 Dirichlet 分布生成分配比例
-        proportions = np.random.dirichlet(alpha * np.ones(num_clients))
-        
-        # 根据比例分配样本
-        proportions = (np.cumsum(proportions) * len(class_indices)).astype(int)[:-1]
-        split_indices = np.split(class_indices, proportions)
-        
-        # 将样本分配给各个客户端
-        for client_id, idx in enumerate(split_indices):
-            client_data[client_id].extend(idx.tolist())
-    
-    # 转换为 (X, y) 元组
-    result = []
-    for client_id in range(num_clients):
-        indices = np.array(client_data[client_id])
-        np.random.shuffle(indices)
-        result.append((X[indices], y[indices], snr[indices]))
-    
-    return result
-
-
-def split_data_non_iid_snr(X, y, snr, num_clients, alpha=0.5):
-    """
-    按 SNR Non-IID 划分：使用 Dirichlet 分布
-    
-    Args:
-        X: 数据
-        y: 标签
-        snr: SNR 值
-        num_clients: 客户端数量
-        alpha: Dirichlet 分布参数（越小越不均衡）
-        
-    Returns:
-        client_data: 列表，每个元素是 (X_client, y_client, snr_client)
-    """
-    unique_snrs = np.sort(np.unique(snr))
-    client_data = [[] for _ in range(num_clients)]
-    
-    for snr_val in unique_snrs:
-        snr_indices = np.where(snr == snr_val)[0]
-        np.random.shuffle(snr_indices)
-        
-        proportions = np.random.dirichlet(alpha * np.ones(num_clients))
-        proportions = (np.cumsum(proportions) * len(snr_indices)).astype(int)[:-1]
-        split_indices = np.split(snr_indices, proportions)
-        
-        for client_id, idx in enumerate(split_indices):
-            client_data[client_id].extend(idx.tolist())
-    
-    result = []
-    for client_id in range(num_clients):
-        indices = np.array(client_data[client_id])
-        np.random.shuffle(indices)
-        result.append((X[indices], y[indices], snr[indices]))
-    
-    return result
-
-
 def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     """
-    加载预处理的数据
-    
-    Args:
-        dataset_name: 数据集名称
-        data_snr: SNR标识（如 '10dB', '100dB', 'highsnr'）
-        data_dir: 预处理数据目录
-        
-    Returns:
-        X_train: 训练数据
-        y_train: 训练标签
-        X_test: 测试数据
-        y_test: 测试标签
-        num_classes: 类别数
+    加载预处理的数据并进行归一化
     """
     # 构造文件路径
     train_file = os.path.join(data_dir, dataset_name, 'train', f'{data_snr}.pkl')
@@ -304,6 +54,18 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     with open(test_file, 'rb') as f:
         X_test, y_test, snr_test = pickle.load(f)
     
+    # [关键修复] 强制归一化 (Z-Score Normalization)
+    # 扩散模型对数据尺度非常敏感，必须归一化到 Std=1 左右
+    mean = np.mean(X_train)
+    std = np.std(X_train)
+    
+    # 防止除以零
+    if std < 1e-6:
+        std = 1.0
+        
+    X_train = (X_train - mean) / std
+    X_test = (X_test - mean) / std
+    
     # 获取类别数
     config = get_dataset_config(dataset_name)
     num_classes = config['num_classes']
@@ -312,35 +74,77 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     print(f"  训练集: {train_file}")
     print(f"  测试集: {test_file}")
     print(f"  训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
+    print(f"  数据归一化: Mean={mean:.6f}, Std={std:.6f} -> 归一化后 Std=1.0")
     print(f"  数据形状: {X_train.shape}")
     
     return X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes
 
 
+def split_data_iid(X, y, snr, num_clients):
+    """IID 数据划分"""
+    num_samples = len(y)
+    indices = np.random.permutation(num_samples)
+    split_indices = np.array_split(indices, num_clients)
+    
+    client_data = []
+    for client_idx in split_indices:
+        client_data.append((X[client_idx], y[client_idx], snr[client_idx]))
+    return client_data
+
+
+def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
+    """按调制类型 Non-IID 划分"""
+    num_classes = len(np.unique(y))
+    client_data = [[] for _ in range(num_clients)]
+    
+    for class_idx in range(num_classes):
+        class_indices = np.where(y == class_idx)[0]
+        np.random.shuffle(class_indices)
+        proportions = np.random.dirichlet(alpha * np.ones(num_clients))
+        proportions = (np.cumsum(proportions) * len(class_indices)).astype(int)[:-1]
+        split_indices = np.split(class_indices, proportions)
+        
+        for client_id, idx in enumerate(split_indices):
+            client_data[client_id].extend(idx.tolist())
+    
+    result = []
+    for client_id in range(num_clients):
+        indices = np.array(client_data[client_id])
+        np.random.shuffle(indices)
+        result.append((X[indices], y[indices], snr[indices]))
+    return result
+
+
+def split_data_non_iid_snr(X, y, snr, num_clients, alpha=0.5):
+    """按 SNR Non-IID 划分"""
+    unique_snrs = np.sort(np.unique(snr))
+    client_data = [[] for _ in range(num_clients)]
+    
+    for snr_val in unique_snrs:
+        snr_indices = np.where(snr == snr_val)[0]
+        np.random.shuffle(snr_indices)
+        proportions = np.random.dirichlet(alpha * np.ones(num_clients))
+        proportions = (np.cumsum(proportions) * len(snr_indices)).astype(int)[:-1]
+        split_indices = np.split(snr_indices, proportions)
+        
+        for client_id, idx in enumerate(split_indices):
+            client_data[client_id].extend(idx.tolist())
+    
+    result = []
+    for client_id in range(num_clients):
+        indices = np.array(client_data[client_id])
+        np.random.shuffle(indices)
+        result.append((X[indices], y[indices], snr[indices]))
+    return result
+
+
 def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid', 
                    alpha=0.5, data_snr='100dB', data_dir='data_processed'):
-    """
-    获取数据加载器
-    
-    Args:
-        dataset_name: 数据集名称
-        num_clients: 客户端数量
-        batch_size: 批大小
-        non_iid_type: 数据划分类型 ('iid', 'class', 'snr')
-        alpha: Dirichlet 参数（用于 class Non-IID）
-        data_snr: SNR标识（如 '10dB', '100dB', 'highsnr'）
-        data_dir: 预处理数据目录
-        
-    Returns:
-        train_loaders: 列表，每个元素是一个客户端的 DataLoader
-        test_loader: 全局测试集 DataLoader
-        num_classes: 类别数
-    """
+    """获取数据加载器"""
     X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes = load_preprocessed_data(
         dataset_name, data_snr, data_dir
     )
     
-    # 划分客户端数据
     if non_iid_type == 'iid':
         client_data = split_data_iid(X_train, y_train, snr_train, num_clients)
     elif non_iid_type == 'class':
@@ -350,21 +154,17 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
     else:
         raise ValueError(f"未知的 Non-IID 类型: {non_iid_type}")
     
-    # 创建客户端 DataLoader
     train_loaders = []
     for X_client, y_client, snr_client in client_data:
         dataset = SignalDataset(X_client, y_client)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
         train_loaders.append(loader)
     
-    # 创建全局测试集 DataLoader
     test_dataset = SignalDataset(X_test, y_test)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
     print(f"数据集: {dataset_name}")
     print(f"SNR: {data_snr}")
     print(f"客户端数量: {num_clients}, 划分类型: {non_iid_type}")
-    print(f"每个客户端平均样本数: {len(y_train) // num_clients}")
     
     return train_loaders, test_loader, num_classes
-

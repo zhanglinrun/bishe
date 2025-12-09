@@ -55,14 +55,14 @@ def parse_args():
                        help='联邦学习算法')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='CNN1D',
+    parser.add_argument('--model', type=str, default='MCLDNN',
                        choices=['CNN1D', 'ResNet1D', 'MCLDNN'],
                        help='模型架构')
     
     # 联邦学习参数
     parser.add_argument('--num_clients', type=int, default=5,
                        help='客户端数量')
-    parser.add_argument('--num_rounds', type=int, default=30,
+    parser.add_argument('--num_rounds', type=int, default=40,
                        help='训练轮次')
     parser.add_argument('--local_epochs', type=int, default=5,
                        help='本地训练轮数')
@@ -86,7 +86,7 @@ def parse_args():
     parser.add_argument('--non_iid_type', type=str, default='class',
                        choices=['iid', 'class', 'snr'],
                        help='数据划分类型')
-    parser.add_argument('--alpha', type=float, default=0.5,
+    parser.add_argument('--alpha', type=float, default=0.1,
                        help='Dirichlet 参数（用于 class Non-IID）')
     
     # FedProx 参数
@@ -107,12 +107,14 @@ def parse_args():
     parser.add_argument('--distill_lr', type=float, default=0.0002,
                        help='蒸馏阶段学习率')
     parser.add_argument('--pseudo_start_round', type=int, default=10,
-                       help='从第几轮开始使用生成伪样本训练全局模型（FedDiff 稳定性）')
+                       help='从第几轮开始使用生成伪样本训练全局模型')
     parser.add_argument('--guidance_scale', type=float, default=3.0,
                        help='扩散模型采样引导系数')
     parser.add_argument('--pretrained_diffusion', type=str, default='',
                        help='预训练扩散模型路径')
-    # pretrained_diffusion.pt
+    parser.add_argument('--correction_alpha', type=float, default=0.7,
+                       help='FedDiff 服务器端校正的软更新系数 (0.0-1.0)，越大表示校正力度越大')
+
     # FDAM 参数
     parser.add_argument('--diffusion_steps', type=int, default=1000,
                        help='扩散步数')
@@ -126,6 +128,7 @@ def parse_args():
                        help='FDAM 聚合时基于分布偏移的惩罚系数')
     parser.add_argument('--align_noise_std', type=float, default=0.1,
                        help='FDAM 特征加噪标准差')
+    
     # 输出参数
     parser.add_argument('--output_dir', type=str, default='./results',
                        help='输出目录')
@@ -141,7 +144,6 @@ def parse_args():
                        help='随机种子')
     
     return parser.parse_args()
-
 
 
 def set_seed(seed):
@@ -314,7 +316,8 @@ def create_server(algorithm, model, users, args):
             distill_lr=args.distill_lr,
             diffusion_steps=args.diffusion_steps,
             pseudo_start_round=args.pseudo_start_round,
-            guidance_scale=args.guidance_scale
+            guidance_scale=args.guidance_scale,
+            correction_alpha=args.correction_alpha # [新增] 传递软更新系数
         )
         # [关键] 加载预训练生成器到服务器
         if args.pretrained_diffusion and os.path.exists(args.pretrained_diffusion):
@@ -386,6 +389,10 @@ def main():
     logger.info(f"  - 权重衰减: {args.weight_decay}")
     logger.info(f"Non-IID 类型: {args.non_iid_type}")
     logger.info(f"设备: {args.device}")
+    
+    if args.algorithm == 'FedDiff':
+        logger.info(f"FedDiff 设置: Alpha={args.correction_alpha}, Guidance={args.guidance_scale}")
+        
     logger.info("=" * 80)
     
     # 加载数据集
@@ -436,7 +443,14 @@ def main():
     csv_file = os.path.join(temp_output_dir, 
                            f"{args.dataset}_{args.algorithm}_metrics.csv")
     
-    # 先写表头
+    # 再次确保临时目录存在 (修复 FileNotFoundError)
+    if not os.path.exists(temp_output_dir):
+        logger.info(f"警告: 目录 {temp_output_dir} 不存在，正在重新创建...")
+        os.makedirs(temp_output_dir, exist_ok=True)
+    
+    # 保存 CSV
+    csv_file = os.path.join(temp_output_dir, 
+                           f"{args.dataset}_{args.algorithm}_metrics.csv")
     with open(csv_file, 'w', newline='', encoding='utf-8') as f:
         import csv
         writer = csv.writer(f)
@@ -469,7 +483,7 @@ def main():
         handler.close()
         logger.removeHandler(handler)
     
-    # 构建最终文件夹名称并重命名（移除%符号避免Windows问题）
+    # 构建最终文件夹名称并重命名
     params_str = f"{args.num_clients}_{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
     final_dirname = f"{args.dataset}_{args.data_snr}_{args.non_iid_type}_{args.alpha}_{args.algorithm}_{args.model}_{final_acc:.2f}_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
