@@ -1,8 +1,3 @@
-"""
-FedAvg 服务器
-实现联邦平均算法的服务器端
-"""
-
 import torch
 import copy
 from collections import OrderedDict
@@ -50,12 +45,11 @@ class ServerAVG(Server):
     def train(self, test_loader, local_epochs, logger=None):
         """
         FedAvg 训练流程
-        
-        Args:
-            test_loader: 测试数据加载器
-            local_epochs: 本地训练轮数
-            logger: 日志记录器
+        增加：追踪并保存最佳模型参数
         """
+        best_acc = 0.0
+        best_model_weights = copy.deepcopy(self.model.state_dict())
+
         for round_num in range(1, self.num_rounds + 1):
             # 发送全局模型给客户端
             self.send_parameters()
@@ -77,15 +71,31 @@ class ServerAVG(Server):
             # 记录
             self.train_losses.append(test_loss)
             self.train_accuracies.append(accuracy)
+
+            # --- 追踪最佳模型 ---
+            if accuracy > best_acc:
+                best_acc = accuracy
+                best_model_weights = copy.deepcopy(self.model.state_dict())
+                acc_msg = f"{accuracy:.2f}% (*)" # 标记为最佳
+            else:
+                acc_msg = f"{accuracy:.2f}%"
+            # -------------------
             
             # 日志输出
             message = f"Round {round_num}/{self.num_rounds} | " \
                      f"Local Loss: {avg_local_loss:.4f} | " \
                      f"Test Loss: {test_loss:.4f} | " \
-                     f"Test Accuracy: {accuracy:.2f}%"
+                     f"Test Accuracy: {acc_msg}"
             
             if logger:
                 logger.info(message)
             else:
                 print(message)
-
+        
+        # 训练结束后，将模型恢复为最佳状态
+        if logger:
+            logger.info(f"训练结束。恢复最佳模型参数，准确率: {best_acc:.2f}%")
+        else:
+            print(f"训练结束。恢复最佳模型参数，准确率: {best_acc:.2f}%")
+        
+        self.model.load_state_dict(best_model_weights)

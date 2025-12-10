@@ -189,9 +189,9 @@ class ServerFedDiff(ServerAVG):
                     dynamic_threshold=True
                 )
             
-            # 第一步保存调试图片
-            if step == 0 and round_num % 5 == 0:
-                self.visualize_pseudo_data(pseudo_data, labels, round_num)
+            # # 第一步保存调试图片
+            # if step == 0 and round_num % 5 == 0:
+            #     self.visualize_pseudo_data(pseudo_data, labels, round_num)
 
             outputs = self.model(pseudo_data.detach())
             loss = self.correction_criterion(outputs, labels)
@@ -266,5 +266,10 @@ class ServerFedDiff(ServerAVG):
                 print(message)
         
         # 训练结束后，将模型恢复为最佳状态
-        print(f"\n[Server] Training finished. Reloading best model with Accuracy: {best_acc:.2f}%")
+        final_msg = f"训练结束。恢复最佳模型参数，准确率: {best_acc:.2f}%"
+        if logger:
+            logger.info(final_msg)
+        else:
+            print(f"\n[Server] {final_msg}")
+        
         self.model.load_state_dict(best_model_weights)

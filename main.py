@@ -141,7 +141,10 @@ def parse_args():
     
     # 随机种子
     parser.add_argument('--seed', type=int, default=42,
-                       help='随机种子')
+                       help='随机种子 (用于模型初始化和训练)')
+    # [新增] 数据划分种子
+    parser.add_argument('--data_seed', type=int, default=None,
+                       help='数据划分种子 (若指定，则固定数据划分，不受 --seed 影响)')
     
     return parser.parse_args()
 
@@ -232,7 +235,6 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
                 gen_learning_rate=args.distill_lr
             )
             
-            # [关键] 如果有预训练生成器，加载给每个客户端作为起点
             if args.pretrained_diffusion and os.path.exists(args.pretrained_diffusion):
                 try:
                     user.generator.load_state_dict(torch.load(args.pretrained_diffusion, map_location=args.device))
@@ -317,9 +319,8 @@ def create_server(algorithm, model, users, args):
             diffusion_steps=args.diffusion_steps,
             pseudo_start_round=args.pseudo_start_round,
             guidance_scale=args.guidance_scale,
-            correction_alpha=args.correction_alpha # [新增] 传递软更新系数
+            correction_alpha=args.correction_alpha
         )
-        # [关键] 加载预训练生成器到服务器
         if args.pretrained_diffusion and os.path.exists(args.pretrained_diffusion):
             server.load_generator(args.pretrained_diffusion)
 
@@ -356,7 +357,7 @@ def main():
         torch.cuda.set_device(args.gpu_id)
         args.device = f'cuda:{args.gpu_id}'
     
-    # 设置随机种子
+    # 设置初始随机种子 (默认行为)
     set_seed(args.seed)
     
     # 创建临时输出目录（带时间戳）
@@ -392,10 +393,23 @@ def main():
     
     if args.algorithm == 'FedDiff':
         logger.info(f"FedDiff 设置: Alpha={args.correction_alpha}, Guidance={args.guidance_scale}")
+    
+    # 日志中明确当前使用的种子策略
+    if args.data_seed is not None:
+        logger.info(f"数据种子 (Data Seed): {args.data_seed} (固定数据划分)")
+    logger.info(f"训练种子 (Train Seed): {args.seed} (模型初始化与训练)")
         
     logger.info("=" * 80)
     
-    # 加载数据集
+    # ------------------------------------------------------------------
+    # [关键修改] 数据划分逻辑与训练随机性分离
+    # ------------------------------------------------------------------
+    # 1. 切换随机种子以固定数据划分 (如果提供了 data_seed)
+    if args.data_seed is not None:
+        logger.info(f"切换随机种子至 Data Seed: {args.data_seed} 以生成固定的数据划分...")
+        set_seed(args.data_seed)
+    
+    # 加载数据集 (此时如果 set_seed 刚被调用，划分将基于 data_seed)
     logger.info("加载数据集...")
     train_loaders, test_loader, num_classes = get_dataloaders(
         dataset_name=args.dataset,
@@ -406,6 +420,12 @@ def main():
         data_snr=args.data_snr,
         data_dir=args.data_dir
     )
+
+    # 2. 恢复/重置训练种子 (以确保模型初始化和后续训练只受 --seed 影响)
+    if args.data_seed is not None:
+        logger.info(f"切换随机种子回 Train Seed: {args.seed} 以进行模型初始化和训练...")
+        set_seed(args.seed)
+    # ------------------------------------------------------------------
     
     # 获取数据集配置
     config = get_dataset_config(args.dataset)
@@ -439,10 +459,6 @@ def main():
     logger.info("=" * 80)
     logger.info("保存结果...")
     
-    # 保存 CSV 日志
-    csv_file = os.path.join(temp_output_dir, 
-                           f"{args.dataset}_{args.algorithm}_metrics.csv")
-    
     # 再次确保临时目录存在 (修复 FileNotFoundError)
     if not os.path.exists(temp_output_dir):
         logger.info(f"警告: 目录 {temp_output_dir} 不存在，正在重新创建...")
@@ -463,18 +479,20 @@ def main():
     
     logger.info(f"训练指标已保存到: {csv_file}")
     
-    # 保存模型
+    # 保存模型 (此时已是最佳模型)
     model_file = os.path.join(temp_output_dir, 
                              f"{args.dataset}_{args.algorithm}_model.pt")
     save_model(server.model, model_file)
     logger.info(f"模型已保存到: {model_file}")
     
-    # 输出最终结果
-    final_acc = accuracies[-1]
-    final_loss = losses[-1]
+    # 输出最终结果 (使用历史最高准确率)
+    final_acc = max(accuracies) if accuracies else 0.0
+    final_loss_idx = accuracies.index(final_acc) if accuracies else -1
+    final_loss = losses[final_loss_idx] if losses else 0.0
+    
     logger.info("=" * 80)
     logger.info(f"训练完成！")
-    logger.info(f"最终测试准确率: {final_acc:.2f}%")
+    logger.info(f"最终测试准确率 (Best): {final_acc:.2f}%")
     logger.info(f"最终测试损失: {final_loss:.4f}")
     logger.info("=" * 80)
     

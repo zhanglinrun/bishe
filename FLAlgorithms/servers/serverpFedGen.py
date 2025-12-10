@@ -82,6 +82,9 @@ class ServerFedGen(Server):
             local_epochs: 本地训练轮数
             logger: 日志记录器
         """
+        best_acc = 0.0
+        best_model_weights = copy.deepcopy(self.model.state_dict())
+
         for round_num in range(1, self.num_rounds + 1):
             # 发送全局模型和生成器给客户端
             self.send_parameters()
@@ -104,14 +107,31 @@ class ServerFedGen(Server):
             self.train_losses.append(test_loss)
             self.train_accuracies.append(accuracy)
             
+            # --- 追踪最佳模型 ---
+            if accuracy > best_acc:
+                best_acc = accuracy
+                best_model_weights = copy.deepcopy(self.model.state_dict())
+                acc_msg = f"{accuracy:.2f}% (*)" 
+            else:
+                acc_msg = f"{accuracy:.2f}%"
+            # -------------------
+
             # 日志输出
             message = f"Round {round_num}/{self.num_rounds} | " \
                      f"Local Loss: {avg_local_loss:.4f} | " \
                      f"Test Loss: {test_loss:.4f} | " \
-                     f"Test Accuracy: {accuracy:.2f}%"
+                     f"Test Accuracy: {acc_msg}"
             
             if logger:
                 logger.info(message)
             else:
                 print(message)
 
+        # 训练结束后，将模型恢复为最佳状态
+        final_msg = f"训练结束。恢复最佳模型参数，准确率: {best_acc:.2f}%"
+        if logger:
+            logger.info(final_msg)
+        else:
+            print(f"\n[Server] {final_msg}")
+        
+        self.model.load_state_dict(best_model_weights)

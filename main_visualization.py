@@ -39,7 +39,7 @@ def main():
     parser.add_argument('--data_dir', type=str, default='data_processed')
     parser.add_argument('--snr', type=str, default='100dB')
     parser.add_argument('--num_clients', type=int, default=5)
-    parser.add_argument('--alpha', type=float, default=0.1, help="Dirichlet alpha for Non-IID")
+    parser.add_argument('--alpha', type=float, default=0.5, help="Dirichlet alpha for Non-IID")
     parser.add_argument('--seed', type=int, default=42, help="随机种子") # 新增种子参数
     parser.add_argument('--load_diffusion', type=str, default='pretrained_diffusion.pt', help="Path to pre-trained diffusion model")
     args = parser.parse_args()
