@@ -83,9 +83,9 @@ def parse_args():
                        help='权重衰减（L2 正则化）')
     
     # Non-IID 参数
-    parser.add_argument('--non_iid_type', type=str, default='class',
-                       choices=['iid', 'class', 'snr'],
-                       help='数据划分类型')
+    parser.add_argument('--non_iid_type', type=str, default='extreme',
+                       choices=['iid', 'class', 'snr', 'extreme', 'centralized'],
+                       help='数据划分类型 (centralized=集中式训练)')
     parser.add_argument('--alpha', type=float, default=0.1,
                        help='Dirichlet 参数（用于 class Non-IID）')
     
@@ -143,7 +143,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42,
                        help='随机种子 (用于模型初始化和训练)')
     # [新增] 数据划分种子
-    parser.add_argument('--data_seed', type=int, default=None,
+    parser.add_argument('--data_seed', type=int, default=42,
                        help='数据划分种子 (若指定，则固定数据划分，不受 --seed 影响)')
     
     return parser.parse_args()
@@ -441,7 +441,8 @@ def main():
     
     # 创建客户端
     logger.info("创建客户端...")
-    users = create_users(args.algorithm, args.num_clients, global_model, train_loaders, args)
+    actual_num_clients = len(train_loaders)
+    users = create_users(args.algorithm, actual_num_clients, global_model, train_loaders, args)
     logger.info(f"已创建 {len(users)} 个客户端")
     
     # 创建服务器

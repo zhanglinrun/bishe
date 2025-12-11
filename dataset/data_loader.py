@@ -2,6 +2,7 @@
 数据加载器
 支持 RML2016.10a, RML2016.10b, RML2018a, HisarMod 数据集
 修复：增加了强制 Z-Score 归一化，确保数据适配扩散模型
+新增：支持 'extreme' (极端异构 - 类别互斥划分)
 """
 
 import numpy as np
@@ -55,18 +56,13 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
         X_test, y_test, snr_test = pickle.load(f)
     
     # [关键修复] 强制归一化 (Z-Score Normalization)
-    # 扩散模型对数据尺度非常敏感，必须归一化到 Std=1 左右
     mean = np.mean(X_train)
     std = np.std(X_train)
-    
-    # 防止除以零
-    if std < 1e-6:
-        std = 1.0
+    if std < 1e-6: std = 1.0
         
     X_train = (X_train - mean) / std
     X_test = (X_test - mean) / std
     
-    # 获取类别数
     config = get_dataset_config(dataset_name)
     num_classes = config['num_classes']
     
@@ -74,8 +70,7 @@ def load_preprocessed_data(dataset_name, data_snr, data_dir='data_processed'):
     print(f"  训练集: {train_file}")
     print(f"  测试集: {test_file}")
     print(f"  训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
-    print(f"  数据归一化: Mean={mean:.6f}, Std={std:.6f} -> 归一化后 Std=1.0")
-    print(f"  数据形状: {X_train.shape}")
+    print(f"  数据归一化: Mean={mean:.6f}, Std={std:.6f}")
     
     return X_train, y_train, snr_train, X_test, y_test, snr_test, num_classes
 
@@ -93,7 +88,7 @@ def split_data_iid(X, y, snr, num_clients):
 
 
 def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
-    """按调制类型 Non-IID 划分"""
+    """按调制类型 Non-IID 划分 (Dirichlet 分布)"""
     num_classes = len(np.unique(y))
     client_data = [[] for _ in range(num_clients)]
     
@@ -112,6 +107,58 @@ def split_data_non_iid_class(X, y, snr, num_clients, alpha=0.5):
         indices = np.array(client_data[client_id])
         np.random.shuffle(indices)
         result.append((X[indices], y[indices], snr[indices]))
+    return result
+
+
+def split_data_extreme_fixed(X, y, snr, num_clients):
+    """
+    极端异构划分 (Partition Non-IID)
+    逻辑：将所有类别打乱后，尽可能均匀地分配给客户端。
+    客户端之间类别不重叠。
+    例如 11 类，5 客户端 -> 分配数量为 [3, 2, 2, 2, 2]
+    """
+    num_classes = len(np.unique(y))
+    print(f"执行极端异构划分: 将 {num_classes} 个类别互斥地划分给 {num_clients} 个客户端")
+
+    # 1. 随机打乱类别顺序 (确保每次运行分配的类别组合不同，受 seed 控制)
+    all_classes = np.arange(num_classes)
+    np.random.shuffle(all_classes)
+
+    # 2. 计算每个客户端应分配的类别数量
+    base_count = num_classes // num_clients
+    remainder = num_classes % num_clients
+    
+    # client_class_counts: 每个客户端分到的类别数列表
+    # 前 remainder 个客户端多拿 1 个类别
+    client_class_counts = [base_count + 1 if i < remainder else base_count for i in range(num_clients)]
+    
+    print(f"  类别数量分配计划: {client_class_counts}")
+
+    # 3. 执行分配
+    result = []
+    start_class_idx = 0
+    
+    for i in range(num_clients):
+        # 获取当前客户端应分到的类别数
+        count = client_class_counts[i]
+        
+        # 从打乱的类别列表中截取
+        assigned_classes = all_classes[start_class_idx : start_class_idx + count]
+        start_class_idx += count
+        
+        # 找出属于这些类别的所有样本索引
+        # np.isin 返回布尔数组，np.where 转换成索引
+        indices = np.where(np.isin(y, assigned_classes))[0]
+        np.random.shuffle(indices)
+        
+        if len(indices) == 0:
+            print(f"[警告] 客户端 {i} 分配到的类别 {assigned_classes} 没有任何样本！")
+        
+        result.append((X[indices], y[indices], snr[indices]))
+        
+        # 打印详细信息供检查
+        print(f"  Client {i}: 分配类别 {assigned_classes} | 样本数: {len(indices)}")
+
     return result
 
 
@@ -145,10 +192,23 @@ def get_dataloaders(dataset_name, num_clients, batch_size, non_iid_type='iid',
         dataset_name, data_snr, data_dir
     )
     
+    print(f"\n执行数据划分: {non_iid_type} ...")
+    
     if non_iid_type == 'iid':
         client_data = split_data_iid(X_train, y_train, snr_train, num_clients)
     elif non_iid_type == 'class':
+        # Dirichlet 划分
+        print(f"  使用 Dirichlet 分布 (Alpha={alpha})")
         client_data = split_data_non_iid_class(X_train, y_train, snr_train, num_clients, alpha)
+    elif non_iid_type == 'extreme':
+        # 极端异构/互斥划分
+        print(f"  使用极端异构划分 (Class Partitioning)")
+        # 注意：不再需要传递 classes_per_client，函数内部自动计算
+        client_data = split_data_extreme_fixed(X_train, y_train, snr_train, num_clients)
+    elif non_iid_type == 'centralized':
+        print(f"  集中式训练 (单客户端)")
+        client_data = [(X_train, y_train, snr_train)]
+        num_clients = 1
     elif non_iid_type == 'snr':
         client_data = split_data_non_iid_snr(X_train, y_train, snr_train, num_clients, alpha)
     else:

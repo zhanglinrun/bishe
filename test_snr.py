@@ -13,6 +13,9 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import csv
+from sklearn.manifold import TSNE
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 # 导入模型和配置
 from FLAlgorithms.trainmodel.models import get_model
@@ -59,40 +62,40 @@ def infer_model_from_path(model_path):
 
 def load_snr_test_data(data_dir, dataset_name):
     """
-    加载所有单独SNR的测试数据
-    
-    Args:
-        data_dir: 数据目录
-        dataset_name: 数据集名称
-        
-    Returns:
-        snr_data: 字典，键为SNR值，值为(X_test, y_test)
+    加载所有单独SNR的测试数据（带归一化）
     """
+    train_dir = os.path.join(data_dir, dataset_name, 'train')
     test_dir = os.path.join(data_dir, dataset_name, 'test')
     
     if not os.path.exists(test_dir):
         raise FileNotFoundError(f"测试数据目录不存在: {test_dir}")
     
-    # 获取所有测试文件
+    train_file = os.path.join(train_dir, '100dB.pkl')
+    with open(train_file, 'rb') as f:
+        X_train, _, _ = pickle.load(f)
+    mean = np.mean(X_train)
+    std = np.std(X_train)
+    if std < 1e-6: std = 1.0
+    del X_train
+    print(f"  归一化参数: Mean={mean:.6f}, Std={std:.6f}")
+    
     test_files = [f for f in os.listdir(test_dir) if f.endswith('.pkl')]
     
     snr_data = {}
     
     for file in test_files:
-        # 提取SNR值（跳过合并文件）
         if file in ['100dB.pkl', 'highsnr.pkl']:
             continue
         
-        # 从文件名提取SNR值（如 "-20dB.pkl" -> -20）
         match = re.match(r'(-?\d+)dB\.pkl', file)
         if match:
             snr = int(match.group(1))
             
-            # 加载数据
             file_path = os.path.join(test_dir, file)
             with open(file_path, 'rb') as f:
-                X_test, y_test = pickle.load(f)
+                X_test, y_test, _ = pickle.load(f)
             
+            X_test = (X_test - mean) / std
             snr_data[snr] = (X_test, y_test)
     
     return snr_data
@@ -175,14 +178,96 @@ def plot_snr_accuracy(snr_list, accuracy_list, output_path, dataset_name, algori
     # 保存图像
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path.replace('.pdf', '.png'), dpi=300, bbox_inches='tight')
     print(f"  图像已保存到: {output_path}")
     plt.close()
+
+
+def get_predictions_and_features(model, X, y, device, batch_size=256):
+    model.eval()
+    dataset = SignalDataset(X, y)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    
+    all_preds, all_labels, all_features = [], [], []
+    
+    with torch.no_grad():
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            features = model.extract_features(X_batch)
+            outputs = model(X_batch)
+            _, preds = torch.max(outputs, 1)
+            
+            all_preds.append(preds.cpu().numpy())
+            all_labels.append(y_batch.numpy())
+            all_features.append(features.cpu().numpy())
+    
+    return np.concatenate(all_preds), np.concatenate(all_labels), np.concatenate(all_features)
+
+
+def plot_confusion_matrix(y_true, y_pred, class_names, output_path, title):
+    cm = confusion_matrix(y_true, y_pred)
+    cm_norm = cm.astype('float') / cm.sum(axis=1, keepdims=True)
+    
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
+                xticklabels=class_names, yticklabels=class_names,
+                annot_kws={'size': 8})
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path.replace('.pdf', '.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  混淆矩阵已保存到: {output_path}")
+
+
+def plot_tsne(features, labels, class_names, output_path, title, max_samples=5000):
+    if len(features) > max_samples:
+        idx = np.random.choice(len(features), max_samples, replace=False)
+        features, labels = features[idx], labels[idx]
+    
+    print(f"    运行 t-SNE (样本数: {len(features)})...")
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42, n_iter=1000)
+    features_2d = tsne.fit_transform(features)
+    
+    plt.figure(figsize=(14, 10))
+    colors = plt.cm.tab20(np.linspace(0, 1, len(class_names)))
+    for i, name in enumerate(class_names):
+        mask = labels == i
+        plt.scatter(features_2d[mask, 0], features_2d[mask, 1], 
+                   c=[colors[i]], label=name, alpha=0.6, s=10)
+    plt.title(title)
+    plt.xlabel('t-SNE Dim 1')
+    plt.ylabel('t-SNE Dim 2')
+    plt.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path.replace('.pdf', '.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  t-SNE 图已保存到: {output_path}")
+
+
+def load_single_snr_data(data_dir, dataset_name, snr_name):
+    train_dir = os.path.join(data_dir, dataset_name, 'train')
+    test_dir = os.path.join(data_dir, dataset_name, 'test')
+    
+    with open(os.path.join(train_dir, '100dB.pkl'), 'rb') as f:
+        X_train, _, _ = pickle.load(f)
+    mean, std = np.mean(X_train), np.std(X_train)
+    if std < 1e-6: std = 1.0
+    del X_train
+    
+    with open(os.path.join(test_dir, f'{snr_name}.pkl'), 'rb') as f:
+        X_test, y_test, _ = pickle.load(f)
+    X_test = (X_test - mean) / std
+    return X_test, y_test
 
 
 def main():
     parser = argparse.ArgumentParser(description='按SNR评估模型性能')
     
-    parser.add_argument('--model_path', type=str, default='results\RML2016.10a_10dB_FedAvg_9.09pct_10_0.001_128_5_10231051\RML2016.10a_FedAvg_model.pt',
+    parser.add_argument('--model_path', type=str, default='results/RML2016.10a_100dB_centralized_0.5_FedAvg_MCLDNN_62.55_5_40_5_0.001_128_12111515/RML2016.10a_FedAvg_model.pt',
                        help='训练好的模型文件路径（.pt）')
     parser.add_argument('--dataset_name', type=str, default='RML2016.10a',
                        choices=['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod'],
@@ -296,7 +381,7 @@ def main():
     elif 'FedGen' in parent_dir:
         algorithm_name = 'FedGen'
     
-    plot_file = os.path.join(output_dir, f'{base_name}_snr.png')
+    plot_file = os.path.join(output_dir, f'{base_name}_snr.pdf')
     plot_snr_accuracy(snr_list, accuracy_list, plot_file, 
                      args.dataset_name, algorithm_name)
     
@@ -307,6 +392,26 @@ def main():
     print(f"最高准确率: {np.max(accuracy_list):.2f}% (SNR = {snr_list[np.argmax(accuracy_list)]}dB)")
     print(f"最低准确率: {np.min(accuracy_list):.2f}% (SNR = {snr_list[np.argmin(accuracy_list)]}dB)")
     print("=" * 80)
+    
+    class_names = config['classes']
+    snr_configs = [('100dB', 'All SNR'), ('highsnr', 'High SNR'), ('14dB', '14dB')]
+    
+    print("\n绘制混淆矩阵和 t-SNE...")
+    for snr_name, snr_label in snr_configs:
+        print(f"\n  处理 {snr_label}...")
+        try:
+            X_test, y_test = load_single_snr_data(args.data_dir, args.dataset_name, snr_name)
+            preds, labels, features = get_predictions_and_features(model, X_test, y_test, args.device, args.batch_size)
+            
+            cm_path = os.path.join(output_dir, f'{base_name}_cm_{snr_name}.pdf')
+            plot_confusion_matrix(labels, preds, class_names, cm_path, f'Confusion Matrix ({snr_label})')
+            
+            tsne_path = os.path.join(output_dir, f'{base_name}_tsne_{snr_name}.pdf')
+            plot_tsne(features, labels, class_names, tsne_path, f't-SNE ({snr_label})')
+        except Exception as e:
+            print(f"    跳过 {snr_label}: {e}")
+    
+    print("\n所有图像绘制完成！")
 
 
 if __name__ == '__main__':
