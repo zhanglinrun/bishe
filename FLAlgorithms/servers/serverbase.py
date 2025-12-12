@@ -100,3 +100,22 @@ class Server:
         """
         return self.train_losses, self.train_accuracies
 
+    def evaluate_clients(self, test_loader):
+        """
+        评估每个客户端模型在测试集上的准确率
+        """
+        client_accs = []
+        for user in self.users:
+            user.model.eval()
+            correct = 0
+            total = 0
+            with torch.no_grad():
+                for X, y in test_loader:
+                    X, y = X.to(self.device), y.to(self.device)
+                    outputs = user.model(X)
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += y.size(0)
+                    correct += (predicted == y).sum().item()
+            client_accs.append(100.0 * correct / total)
+        return client_accs
+

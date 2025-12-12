@@ -267,9 +267,9 @@ def load_single_snr_data(data_dir, dataset_name, snr_name):
 def main():
     parser = argparse.ArgumentParser(description='按SNR评估模型性能')
     
-    parser.add_argument('--model_path', type=str, default='results/RML2016.10a_100dB_centralized_0.5_FedAvg_MCLDNN_62.55_5_40_5_0.001_128_12111515/RML2016.10a_FedAvg_model.pt',
+    parser.add_argument('--model_path', type=str, default='results/RML2016.10b_100dB_extreme_0.1_FedDiff_MCLDNN_43.50_5_40_5_0.001_128_12110843/RML2016.10b_FedDiff_model.pt',
                        help='训练好的模型文件路径（.pt）')
-    parser.add_argument('--dataset_name', type=str, default='RML2016.10a',
+    parser.add_argument('--dataset_name', type=str, default='RML2016.10b',
                        choices=['RML2016.10a', 'RML2016.10b', 'RML2018a', 'HisarMod'],
                        help='数据集名称')
     parser.add_argument('--model', type=str, default='MCLDNN',

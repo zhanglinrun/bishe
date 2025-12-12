@@ -252,12 +252,16 @@ class ServerFedDiff(ServerAVG):
             else:
                 acc_msg = f"{accuracy:.2f}%"
 
+            # 评估各客户端准确率
+            client_accs = self.evaluate_clients(test_loader)
+            client_acc_str = " | ".join([f"C{i}:{acc:.1f}%" for i, acc in enumerate(client_accs)])
+
             message = (
                 f"Round {round_num}/{self.num_rounds} | "
                 f"Local Loss: {avg_local_loss:.4f} | "
-                f"Test Acc: {acc_msg} | "
+                f"Global: {acc_msg} | "
                 f"Test Loss: {test_loss:.4f} | "
-                f"Correct Loss: {correction_loss:.4f}"
+                f"Correct Loss: {correction_loss:.4f} | {client_acc_str}"
             )
 
             if logger:

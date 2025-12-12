@@ -15,7 +15,6 @@ from dataset.data_loader import get_dataloaders
 # 导入模型
 from FLAlgorithms.trainmodel.models import get_model
 from FLAlgorithms.trainmodel.generator import Generator
-from FLAlgorithms.trainmodel.diffusion import DiffusionAligner
 
 # 导入客户端
 from FLAlgorithms.users.useravg import UserAVG
@@ -244,29 +243,18 @@ def create_users(algorithm, num_clients, model, train_loaders, args):
             users.append(user)
 
     elif algorithm == 'FDAM':
-        with torch.no_grad():
-            dummy = torch.zeros(1, 2, model.signal_length)
-            feat_dim = model.extract_features(dummy).shape[-1]
         for i in range(num_clients):
-            aligner = DiffusionAligner(
-                feature_dim=feat_dim,
-                hidden_dim=args.align_hidden,
-                diffusion_steps=args.diffusion_steps
-            )
             user = UserFDAM(
                 user_id=i,
                 model=get_model(args.model, model.num_classes, model.signal_length),
-                aligner=aligner,
                 train_loader=train_loaders[i],
                 learning_rate=args.learning_rate,
                 device=args.device,
                 optimizer_type=args.optimizer,
                 momentum=args.momentum,
                 weight_decay=args.weight_decay,
-                lambda_diff=args.lambda_diff,
-                lambda_align=args.lambda_align,
-                mu=args.mu,
-                noise_std=args.align_noise_std
+                diffusion_steps=args.diffusion_steps,
+                gen_learning_rate=args.distill_lr
             )
             users.append(user)
     return users
@@ -325,23 +313,18 @@ def create_server(algorithm, model, users, args):
             server.load_generator(args.pretrained_diffusion)
 
     elif algorithm == 'FDAM':
-        with torch.no_grad():
-            dummy = torch.zeros(1, 2, model.signal_length)
-            feat_dim = model.extract_features(dummy).shape[-1]
-        aligner = DiffusionAligner(
-            feature_dim=feat_dim,
-            hidden_dim=args.align_hidden,
-            diffusion_steps=args.diffusion_steps
-        )
         server = ServerFDAM(
             model=model,
-            aligner=aligner,
             users=users,
             num_rounds=args.num_rounds,
-            num_classes=model.num_classes,
-            feature_dim=feat_dim,
-            align_beta=args.align_beta,
-            device=args.device
+            device=args.device,
+            pseudo_batch_size=args.pseudo_batch_size,
+            distill_steps=args.distill_steps,
+            distill_lr=args.distill_lr,
+            diffusion_steps=args.diffusion_steps,
+            pseudo_start_round=args.pseudo_start_round,
+            guidance_scale=args.guidance_scale,
+            correction_alpha=args.correction_alpha
         )
         
     return server
@@ -503,8 +486,8 @@ def main():
         logger.removeHandler(handler)
     
     # 构建最终文件夹名称并重命名
-    params_str = f"{args.num_clients}_{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
-    final_dirname = f"{args.dataset}_{args.data_snr}_{args.non_iid_type}_{args.alpha}_{args.algorithm}_{args.model}_{final_acc:.2f}_{params_str}_{timestamp}"
+    params_str = f"{args.num_rounds}_{args.local_epochs}_{args.learning_rate}_{args.batch_size}"
+    final_dirname = f"{args.dataset}_{args.seed}_{args.data_snr}_{args.non_iid_type}_{args.alpha}_{args.num_clients}_{args.algorithm}_{args.model}_{final_acc:.2f}_{params_str}_{timestamp}"
     final_output_dir = os.path.join(args.output_dir, final_dirname)
     
     # 重命名临时目录为最终目录

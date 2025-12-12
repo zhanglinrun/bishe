@@ -1,115 +1,155 @@
 """
-FDAM 服务器
-负责扩散对齐模型、分类器与类原型的聚合
+FDAM 服务器 (重构版)
+参考FedDiff，使用DiffusionGenerator进行伪样本生成和服务器端校正
 """
 
 import torch
+import torch.nn as nn
+import copy
 from FLAlgorithms.servers.serverbase import Server
+from FLAlgorithms.trainmodel.diffusion_generator import DiffusionGenerator
 from utils.model_utils import average_weights
 
 
 class ServerFDAM(Server):
-    def __init__(self, model, aligner, users, num_rounds, num_classes, feature_dim, align_beta=0.5, device='cpu'):
+    def __init__(self, model, users, num_rounds, device='cpu',
+                 pseudo_batch_size=128, distill_steps=5, distill_lr=1e-4,
+                 diffusion_steps=1000, pseudo_start_round=5, 
+                 guidance_scale=3.0, correction_alpha=0.7):
         super(ServerFDAM, self).__init__(model, users, num_rounds, device)
-        self.aligner = aligner.to(device)
-        self.num_classes = num_classes
-        self.feature_dim = feature_dim
-        self.align_beta = align_beta
+        self.num_classes = model.num_classes
+        self.signal_length = model.signal_length
+        self.pseudo_batch_size = pseudo_batch_size
+        self.distill_steps = distill_steps
+        self.distill_lr = distill_lr
+        self.pseudo_start_round = pseudo_start_round
+        self.guidance_scale = guidance_scale
+        self.correction_alpha = correction_alpha
 
-        self.prototype_sums = torch.zeros(num_classes, feature_dim, device=device)
-        self.prototype_counts = torch.zeros(num_classes, device=device)
+        self.generator = DiffusionGenerator(
+            num_classes=self.num_classes,
+            signal_length=self.signal_length,
+            in_channels=2,
+            base_channels=64,
+            channel_mults=(1, 2, 4),
+            timesteps=diffusion_steps,
+            beta_schedule="cosine"
+        ).to(device)
+
+        self.correction_criterion = nn.CrossEntropyLoss()
 
     def send_parameters(self):
         global_params = self.model.state_dict()
-        aligner_params = self.aligner.state_dict()
-        prototypes = self.get_global_prototypes()
-
+        gen_params = self.generator.state_dict()
         for user in self.users:
             user.set_parameters(global_params)
-            user.set_aligner_parameters(aligner_params)
-            user.set_global_prototypes(prototypes)
-            user.reset_prototypes()
-
-    def get_global_prototypes(self):
-        counts = self.prototype_counts.clamp(min=1e-6).unsqueeze(-1)
-        return self.prototype_sums / counts
-
-    def aggregate_prototypes(self, client_prototypes):
-        # client_prototypes: list of (sum_tensor, count_tensor)
-        total_sum = torch.zeros_like(self.prototype_sums)
-        total_count = torch.zeros_like(self.prototype_counts)
-
-        for proto_sum, proto_count in client_prototypes:
-            if proto_sum is None or proto_count is None:
-                continue
-            total_sum += proto_sum.to(self.device)
-            total_count += proto_count.to(self.device)
-
-        self.prototype_sums = total_sum
-        self.prototype_counts = total_count
+            user.set_generator_parameters(gen_params)
 
     def aggregate_parameters(self):
         client_params = []
-        align_params = []
+        gen_params = []
         client_weights = []
-        prototype_reports = []
-
         total_samples = 0
-        # 计算基于原型偏移的权重
+
         for user in self.users:
-            proto_sum, proto_count = user.get_local_prototypes()
-            prototype_reports.append((proto_sum, proto_count))
-
-            num_samples = user.get_num_samples()
-            delta = 0.0
-            if proto_sum is not None and proto_count is not None:
-                with torch.no_grad():
-                    global_proto = self.get_global_prototypes().to(self.device)
-                    proto_sum_dev = proto_sum.to(self.device)
-                    proto_count_dev = proto_count.to(self.device)
-                    valid = proto_count_dev > 0
-                    if valid.any():
-                        local_proto = proto_sum_dev / proto_count_dev.clamp(min=1e-6).unsqueeze(-1)
-                        delta = torch.mean(torch.norm(local_proto[valid] - global_proto[valid], dim=1)).item()
-            weight = num_samples / (1 + self.align_beta * delta)
-            client_weights.append(weight)
-            total_samples += weight
-
             client_params.append(user.get_parameters())
-            align_params.append(user.get_aligner_parameters())
+            gen_params.append(user.get_generator_parameters())
+            num_samples = user.get_num_samples()
+            client_weights.append(num_samples)
+            total_samples += num_samples
 
         client_weights = [w / total_samples for w in client_weights]
 
-        # 聚合模型
         global_params = average_weights(client_params, client_weights)
         self.model.load_state_dict(global_params)
 
-        # 聚合对齐模块
-        global_align = average_weights(align_params, client_weights)
-        self.aligner.load_state_dict(global_align)
+        global_gen_params = average_weights(gen_params, client_weights)
+        self.generator.load_state_dict(global_gen_params)
 
-        # 聚合原型
-        self.aggregate_prototypes(prototype_reports)
+    def server_correction(self, round_num):
+        if self.distill_steps <= 0:
+            return 0.0
 
-    def train(self, eval_loader, local_epochs, logger=None, eval_name="Eval"):
+        aggregated_state = copy.deepcopy(self.model.state_dict())
+        self.model.train()
+        self.generator.eval()
+        
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.distill_lr)
+        total_correction_loss = 0.0
+        
+        labels = []
+        samples_per_class = self.pseudo_batch_size // self.num_classes
+        for c in range(self.num_classes):
+            labels.append(torch.full((samples_per_class,), c, dtype=torch.long))
+        remaining = self.pseudo_batch_size - len(labels) * samples_per_class
+        if remaining > 0:
+            labels.append(torch.randint(0, self.num_classes, (remaining,)))
+        labels = torch.cat(labels).to(self.device)
+        labels = labels[torch.randperm(labels.size(0))]
+
+        for step in range(self.distill_steps):
+            optimizer.zero_grad()
+            with torch.no_grad():
+                pseudo_data = self.generator.sample(
+                    self.pseudo_batch_size, labels, 
+                    device=self.device, guidance_scale=self.guidance_scale,
+                    dynamic_threshold=True
+                )
+            outputs = self.model(pseudo_data.detach())
+            loss = self.correction_criterion(outputs, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_correction_loss += loss.item()
+
+        corrected_state = self.model.state_dict()
+        soft_state = {}
+        for k in aggregated_state.keys():
+            soft_state[k] = (1 - self.correction_alpha) * aggregated_state[k] + \
+                            self.correction_alpha * corrected_state[k]
+        self.model.load_state_dict(soft_state)
+
+        return total_correction_loss / self.distill_steps
+
+    def train(self, test_loader, local_epochs, logger=None):
+        best_acc = 0.0
+        best_model_weights = copy.deepcopy(self.model.state_dict())
+
         for round_num in range(1, self.num_rounds + 1):
             self.send_parameters()
 
             local_losses = []
             for user in self.users:
-                loss = user.train(local_epochs)
+                loss = user.train(local_epochs, round_num=round_num)
                 local_losses.append(loss)
-
             avg_local_loss = sum(local_losses) / len(local_losses)
 
             self.aggregate_parameters()
 
-            accuracy, eval_loss = self.evaluate(eval_loader)
-            self.train_losses.append(eval_loss)
+            correction_loss = 0.0
+            if round_num >= self.pseudo_start_round:
+                correction_loss = self.server_correction(round_num)
+
+            accuracy, test_loss = self.evaluate(test_loader)
+            self.train_losses.append(test_loss)
             self.train_accuracies.append(accuracy)
 
-            msg = f"[FDAM] Round {round_num}/{self.num_rounds} | Local Loss: {avg_local_loss:.4f} | {eval_name} Loss: {eval_loss:.4f} | Acc: {accuracy:.2f}%"
+            if accuracy > best_acc:
+                best_acc = accuracy
+                best_model_weights = copy.deepcopy(self.model.state_dict())
+                acc_msg = f"{accuracy:.2f}% (*)"
+            else:
+                acc_msg = f"{accuracy:.2f}%"
+
+            client_accs = self.evaluate_clients(test_loader)
+            client_acc_str = " | ".join([f"C{i}:{acc:.1f}%" for i, acc in enumerate(client_accs)])
+
+            msg = f"Round {round_num}/{self.num_rounds} | Local Loss: {avg_local_loss:.4f} | Global: {acc_msg} | Test Loss: {test_loss:.4f} | Correct: {correction_loss:.4f} | {client_acc_str}"
             if logger:
                 logger.info(msg)
             else:
                 print(msg)
+
+        if logger:
+            logger.info(f"训练结束。恢复最佳模型参数，准确率: {best_acc:.2f}%")
+        self.model.load_state_dict(best_model_weights)
